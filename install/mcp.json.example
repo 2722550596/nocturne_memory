@@ -1,0 +1,13 @@
+{
+ "settings": {
+   "directTools": true,
+   "disableProxyTool": true
+ },
+ "mcpServers": {
+   "": {
+     "command": "/home/yoshi/project/nocturne_memory/venv/bin/python",
+     "args": ["/home/yoshi/project/nocturne_memory/backend/mcp_server.py"],
+     "env": { "NAMESPACE": "klein", "PYTHONPATH": "/home/yoshi/project/nocturne_memory/backend" }
+   }
+ }
+}

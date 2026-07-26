@@ -100,7 +100,7 @@ async def fetch_and_format_memory(uri: str, track_access: bool = False) -> str:
 
             if lines_to_add:
                 lines.append("---")
-                lines.append("**相关联想:**")
+                lines.append("相关联想:")
                 lines.extend(lines_to_add)
                 lines.append("")
     except Exception:
@@ -108,7 +108,7 @@ async def fetch_and_format_memory(uri: str, track_access: bool = False) -> str:
 
     if children:
         lines.append("---")
-        lines.append("**更深层的记忆:**")
+        lines.append("更深层的记忆:")
         lines.append("")
 
         for child in children:
