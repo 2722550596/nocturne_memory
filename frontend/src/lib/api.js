@@ -130,6 +130,8 @@ export const activatePreset = (id) =>
 export const duplicatePreset = (id, newName) =>
   api.post(`/presets/${id}/duplicate`, { new_name: newName }).then(res => res.data);
 
+// --- Database ---
+
 export const getDatabaseStatus = () =>
   api.get('/settings/database/status').then(res => res.data);
 

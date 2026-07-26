@@ -6,7 +6,7 @@ from namespace_middleware import _validate_namespace
 from locales import t
 from sqlalchemy import select, func, delete
 from datetime import datetime, timedelta
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from typing import Optional
 
 router = APIRouter(prefix="/maintenance", tags=["maintenance"])
@@ -104,7 +104,7 @@ async def clear_access_logs(req: ClearLogsRequest):
 class RestoreOrphanRequest(BaseModel):
     new_domain: str = "core"
     new_path: str
-    priority: int = Field(default=0, ge=0)
+    priority: int = 0
     disclosure: Optional[str] = None
     namespace: Optional[str] = None
 

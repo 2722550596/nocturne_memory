@@ -21,8 +21,7 @@ import shutil
 import subprocess
 import sys
 import webbrowser
-from typing import Any, Dict, List, Optional, Tuple, Annotated
-from pydantic import Field
+from typing import Any, Dict, List, Optional, Tuple
 import config as _cfg
 
 # Ensure we can import from backend modules
@@ -46,6 +45,7 @@ from text_patch import (
 from system_views import (
     fetch_and_format_memory,
     generate_boot_memory_view,
+    generate_wakeup_view,
     generate_memory_index_view,
     generate_recent_memories_view,
     generate_glossary_index_view,
@@ -348,6 +348,8 @@ async def read_memory(uri: str) -> str:
 
     Special System URIs:
     - system://boot   : [Startup Only] Loads your core memories.
+    - system://wakeup : [Startup Only] Boot memories + recent history scenes in one call.
+    - system://wakeup/N : Same as wakeup but with N history entries (e.g. system://wakeup/10).
     - system://index/<domain> : Loads an index of memories only under the specified domain (e.g. system://index/writer).
     - system://recent : Shows recently modified memories (default: 10).
     - system://recent/N : Shows the N most recently modified memories (e.g. system://recent/20).
@@ -375,8 +377,23 @@ async def read_memory(uri: str) -> str:
         current_core_uris = await preset_service.get_boot_uris(ns)
         return await generate_boot_memory_view(current_core_uris)
 
-    # system://index/<domain>
+    # system://wakeup or system://wakeup/N
     stripped = uri.strip()
+    if stripped == "system://wakeup" or stripped.startswith("system://wakeup/"):
+        ns = get_namespace()
+        from db import get_preset_service
+        preset_service = get_preset_service()
+        current_core_uris = await preset_service.get_boot_uris(ns)
+        history_limit = 5  # default
+        suffix = stripped[len("system://wakeup"):].strip("/")
+        if suffix:
+            try:
+                history_limit = max(1, min(20, int(suffix)))
+            except ValueError:
+                pass
+        return await generate_wakeup_view(current_core_uris, history_limit)
+
+    # system://index/<domain>
     if stripped.startswith("system://index/"):
         domain_filter = stripped[len("system://index/") :].strip("/")
         if not domain_filter:
@@ -447,23 +464,11 @@ async def read_memory(uri: str) -> str:
 
 @write_tool()
 async def create_memory(
-    parent_uri: Annotated[str, Field(
-        description="The existing parent node URI to create this memory under (e.g. 'core://agent' or 'writer://')."
-    )],
-    content: Annotated[str, Field(
-        description="The detailed text content of the memory."
-    )],
-    priority: Annotated[int, Field(
-        ge=0,
-        description="Relative retrieval priority (lower values are retrieved first, typically 1, 2, or 3)."
-    )],
-    disclosure: Annotated[str, Field(
-        description="A short trigger condition describing WHEN to recall this memory (must be an input/output signal, e.g. 'When the user mentions...')."
-    )],
-    title: Annotated[str, Field(
-        default=None,
-        description="Glanceable ENGLISH-ONLY concept name (alphanumeric, hyphens, underscores ONLY)."
-    )],
+    parent_uri: str,
+    content: str,
+    priority: int,
+    disclosure: str,
+    title: Optional[str] = None,
 ) -> str:
     """
     Creates a new memory under a parent URI.
@@ -498,7 +503,7 @@ async def create_memory(
                       BAD:  "When I start lecturing about nutrition" (already mid-failure)
                       BAD:  "When I feel / realize / notice myself ..." (self-awareness never fires in time)
                       BAD:  "important", "remember" (zero information)
-        title: A concrete, glanceable ENGLISH-ONLY concept name (alphanumeric, hyphens, underscores ONLY).
+        title: A concrete, glanceable concept name (alphanumeric, hyphens, underscores only).
                     You should be able to understand what's inside without clicking into the content.
                     Avoid abstract jargon, category labels (e.g. 'logs', 'errors', 'misc'),
                     and long action sentences. If not provided, auto-assigns numeric ID.
@@ -513,9 +518,6 @@ async def create_memory(
     graph = get_graph_service()
 
     try:
-        if priority < 0:
-            return "Error: priority must be >= 0."
-
         # Validate disclosure (required, non-empty)
         if not disclosure or not disclosure.strip():
             return (
@@ -613,9 +615,6 @@ async def update_memory(
     graph = get_graph_service()
 
     try:
-        if priority is not None and priority < 0:
-            return "Error: priority must be >= 0."
-
         notices: List[str] = []
 
         # Parse URI
@@ -869,9 +868,6 @@ async def add_alias(
     graph = get_graph_service()
 
     try:
-        if priority < 0:
-            return "Error: priority must be >= 0."
-
         new_domain, new_path = parse_uri(new_uri)
         target_domain, target_path = parse_uri(target_uri)
 

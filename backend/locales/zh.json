@@ -35,6 +35,7 @@
       "db_create_failed": "创建数据库失败: {error}",
       "db_connected": "连接成功",
       "db_failed": "连接失败: {error}",
+      "db_swap_failed": "切换数据库失败: {error}",
       "open_folder_docker": "Docker 部署中无法打开文件夹。请通过主机上的挂载卷访问文件。",
       "sqlite_only": "仅适用于 SQLite 数据库",
       "parse_path_failed": "无法从 URL 解析数据库路径",

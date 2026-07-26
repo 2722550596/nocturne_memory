@@ -42,11 +42,6 @@ def _default_database_url() -> str:
 
 DEFAULTS: dict[str, Any] = {
     "database_url": _default_database_url(),
-    # PostgreSQL connection pool sizing (ignored for SQLite).
-    # Sized for the typical single-user MCP workload; raise for
-    # high-concurrency deployments. Takes effect after restart.
-    "db_pool_size": 5,
-    "db_max_overflow": 5,
     "valid_domains": ["core", "writer", "game", "notes", "narrative"],
     "boot_uris": {"": ["core://agent", "core://my_user", "core://agent/my_user"]},
     "host": "127.0.0.1",

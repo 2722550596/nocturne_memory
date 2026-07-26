@@ -394,13 +394,226 @@ async def generate_glossary_index_view() -> str:
         return t("system.error_glossary").format(error=str(e))
 
 
+async def generate_wakeup_view(boot_uris: List[str], history_limit: int = 5) -> str:
+    """Generate the system wakeup view (system://wakeup).
+    
+    Clean format matching .pi/lib/nocturne-memory.ts extension style.
+    No metadata (Memory ID, Last Modified, Aliases, Glossary).
+    Only URI, disclosure, content, and children snippets.
+    
+    Structure:
+    - Boot memories (full content + children snippets)
+    - Recent core memories (index)
+    - Recent history summaries
+    - Latest history_raw
+    """
+    from mcp_server import make_uri, DEFAULT_DOMAIN
+    
+    graph = get_graph_service()
+    ns = get_namespace()
+    sections: List[str] = []
+    
+    # ── Helper: clean format for a single memory ──
+    async def _format_memory_clean(uri: str, max_children: int = 3) -> str:
+        """Format one memory in clean style: ### uri, disclosure, content, children."""
+        from mcp_server import parse_uri
+        domain, mem_path = parse_uri(uri)
+        if not domain:
+            domain = DEFAULT_DOMAIN
+        
+        detail = await graph.get_memory_by_path(mem_path, domain, namespace=ns)
+        if not detail:
+            return ""
+        
+        content = detail.get("content", "")
+        if not content:
+            return ""
+        
+        disp_domain = detail.get("domain", domain)
+        disp_path = detail.get("path", mem_path)
+        disp_uri = make_uri(disp_domain, disp_path)
+        disclosure = detail.get("disclosure")
+        
+        lines: List[str] = []
+        lines.append(f"### {disp_uri}")
+        if disclosure:
+            lines.append(f"> {disclosure}")
+        lines.append(content)
+        lines.append("")
+        
+        # Children as snippets
+        if max_children > 0:
+            children = await graph.get_children(
+                detail.get("node_uuid"),
+                context_domain=domain,
+                context_path=mem_path,
+                namespace=ns,
+            )
+            if children:
+                for child in children[:max_children]:
+                    child_domain = child.get("domain", domain)
+                    child_path = child.get("path", "")
+                    child_uri = make_uri(child_domain, child_path)
+                    child_disc = child.get("disclosure")
+                    snippet = (child.get("content_snippet") or "").replace("\n", " ").strip()
+                    disc_str = f" ({child_disc})" if child_disc else ""
+                    snip_str = f" — {snippet}" if snippet else ""
+                    lines.append(f"- {child_uri}{disc_str}{snip_str}")
+                lines.append("")
+        
+        return "\n".join(lines)
+    
+    # ── Helper: clean format for recent domain entries ──
+    async def _format_recent_domain(domain: str, limit: int) -> List[str]:
+        """Get recent entries from a domain, formatted clean."""
+        all_paths = await graph.get_all_paths(namespace=ns)
+        
+        # Deduplicate by node_uuid
+        items = []
+        seen = set()
+        for item in all_paths:
+            if item.get("domain", DEFAULT_DOMAIN) != domain:
+                continue
+            nid = item.get("node_uuid", "")
+            if not nid or nid in seen:
+                continue
+            seen.add(nid)
+            items.append(item)
+        
+        # Fetch details
+        detailed = []
+        for item in items:
+            try:
+                p = item.get("path", "")
+                uri = item.get("uri") or make_uri(domain, p)
+                detail = await graph.get_memory_by_path(p, domain, namespace=ns)
+                if detail:
+                    detailed.append({
+                        "uri": uri,
+                        "path": p,
+                        "content": detail.get("content", ""),
+                        "disclosure": detail.get("disclosure"),
+                        "created_at": detail.get("created_at", ""),
+                        "node_uuid": detail.get("node_uuid"),
+                    })
+            except Exception:
+                continue
+        
+        # Sort by created_at DESC
+        detailed.sort(key=lambda x: x.get("created_at") or "", reverse=True)
+        
+        result: List[str] = []
+        for entry in detailed[:limit]:
+            lines: List[str] = []
+            lines.append(f"### {entry['uri']}")
+            if entry.get("disclosure"):
+                lines.append(f"> {entry['disclosure']}")
+            content = entry.get("content", "")
+            if content:
+                lines.append(content)
+            lines.append("")
+            result.append("\n".join(lines))
+        
+        return result
+    
+    # ── Helper: recent core index (like extension's "最近动态") ──
+    async def _format_recent_core_index(limit: int = 5) -> List[str]:
+        """Recent core memories as compact index lines."""
+        all_paths = await graph.get_all_paths(namespace=ns)
+        
+        core_items = []
+        seen = set()
+        for item in all_paths:
+            if item.get("domain", DEFAULT_DOMAIN) != "core":
+                continue
+            nid = item.get("node_uuid", "")
+            if not nid or nid in seen:
+                continue
+            seen.add(nid)
+            core_items.append(item)
+        
+        # Fetch details for sorting
+        detailed = []
+        for item in core_items:
+            try:
+                p = item.get("path", "")
+                uri = item.get("uri") or make_uri("core", p)
+                detail = await graph.get_memory_by_path(p, "core", namespace=ns)
+                if detail:
+                    detailed.append({
+                        "uri": uri,
+                        "disclosure": detail.get("disclosure"),
+                        "content_snippet": (detail.get("content", "") or "").replace("\n", " ").strip()[:120],
+                        "created_at": detail.get("created_at", ""),
+                    })
+            except Exception:
+                continue
+        
+        detailed.sort(key=lambda x: x.get("created_at") or "", reverse=True)
+        
+        lines: List[str] = []
+        for entry in detailed[:limit]:
+            disc = f" ({entry['disclosure']})" if entry.get("disclosure") else ""
+            snippet = f" — {entry['content_snippet']}" if entry.get("content_snippet") else ""
+            lines.append(f"- {entry['uri']}{disc}{snippet}")
+        
+        return lines
+    
+    # ══════════════════════════════════════════════════════
+    # 1. BOOT MEMORIES (full content)
+    # ══════════════════════════════════════════════════════
+    boot_blocks: List[str] = []
+    for uri in boot_uris:
+        try:
+            formatted = await _format_memory_clean(uri, max_children=3)
+            if formatted:
+                boot_blocks.append(formatted)
+        except Exception:
+            continue
+    
+    if boot_blocks:
+        sections.append("\n".join(boot_blocks).strip())
+    
+    # ══════════════════════════════════════════════════════
+    # 2. RECENT CORE INDEX (like extension's "最近动态")
+    # ══════════════════════════════════════════════════════
+    try:
+        recent_core = await _format_recent_core_index(limit=5)
+        if recent_core:
+            sections.append("## 最近动态\n" + "\n".join(recent_core))
+    except Exception:
+        pass
+    
+    # ══════════════════════════════════════════════════════
+    # 3. RECENT HISTORY SUMMARIES
+    # ══════════════════════════════════════════════════════
+    try:
+        history_blocks = await _format_recent_domain("history", history_limit)
+        if history_blocks:
+            sections.append("## 最近场景\n" + "\n---\n\n".join(history_blocks))
+    except Exception:
+        pass
+    
+    # ══════════════════════════════════════════════════════
+    # 4. LATEST HISTORY_RAW (raw scene record)
+    # ══════════════════════════════════════════════════════
+    try:
+        raw_blocks = await _format_recent_domain("history_raw", 1)
+        if raw_blocks:
+            sections.append("## 最近场景记录\n" + "\n".join(raw_blocks))
+    except Exception:
+        pass
+    
+    return "\n\n---\n\n".join(sections)
+
 async def generate_diagnostic_view(domain: str, days_stale: int = 30, max_children: int = 10) -> str:
     """Generate a diagnostic report of the memory graph (system://diagnostic/<domain>)."""
     graph = get_graph_service()
 
     try:
+        priority_thresholds = {0: 3, 1: 7, 2: 14}
         diagnostics = await graph.get_diagnostics(
-            namespace=get_namespace(), days_stale=days_stale, max_children=max_children, domain=domain
+            namespace=get_namespace(), days_stale=days_stale, max_children=max_children, priority_thresholds=priority_thresholds, domain=domain
         )
 
         stale_nodes = diagnostics.get("stale_nodes", [])
@@ -421,7 +634,7 @@ async def generate_diagnostic_view(domain: str, days_stale: int = 30, max_childr
             lines.extend([
                 "## 1. Stale Memories",
                 "Nodes not accessed within their priority threshold.",
-                "Thresholds double for each priority level: Priority 0 (<3 days), Priority 1 (<7 days), Priority 2 (<14 days), Priority 3 (<28 days), etc.",
+                f"Thresholds: Priority 0 (<3 days), Priority 1 (<7 days), Priority 2 (<14 days), Others (<{days_stale} days).",
                 ""
             ])
 

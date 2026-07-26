@@ -6,7 +6,7 @@ hierarchical browser. Every path is just a node with content and children.
 """
 
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from typing import Optional
 import config
 from db import get_graph_service, get_glossary_service, get_db_manager, get_search_indexer, get_preset_service
@@ -21,7 +21,7 @@ router = APIRouter(prefix="/browse", tags=["browse"])
 
 class NodeUpdate(BaseModel):
     content: str | None = None
-    priority: int | None = Field(default=None, ge=0)
+    priority: int | None = None
     disclosure: str | None = None
 
 
@@ -38,7 +38,7 @@ class GlossaryRemove(BaseModel):
 class CreateMemoryRequest(BaseModel):
     parent_path: str
     content: str
-    priority: int = Field(ge=0)
+    priority: int
     disclosure: str
     title: str | None = None
     domain: str = "core"
@@ -50,7 +50,7 @@ class CreateAliasRequest(BaseModel):
     disclosure: str
     new_domain: str = "core"
     target_domain: str = "core"
-    priority: int = Field(default=0, ge=0)
+    priority: int = 0
 
 
 @router.get("/namespaces")
@@ -568,3 +568,45 @@ async def search_memories(
     search = get_search_indexer()
     results = await search.search(q, limit=limit, domain=domain, namespace=get_namespace())
     return {"query": q, "results": results, "count": len(results)}
+
+
+# =============================================================================
+# Recent Memories Endpoint
+# =============================================================================
+
+
+@router.get("/recent")
+async def recent_memories(
+    limit: int = Query(10, ge=1, le=50, description="Number of recent memories to return"),
+    domain: Optional[str] = Query(None, description="Optional domain filter, e.g. 'core'"),
+):
+    """Return the most recently created memories."""
+    graph = get_graph_service()
+    raw = await graph.get_recent_memories(limit=limit, namespace=get_namespace(), domain=domain)
+    
+    # 补充 content_snippet
+    results = []
+    for mem in raw:
+        snippet = ""
+        # 尝试从数据库获取 content
+        try:
+            from db import get_db_manager
+            from db.models import Memory as MemoryModel
+            from sqlalchemy import select
+            db = get_db_manager()
+            async with db.session() as session:
+                row = await session.execute(
+                    select(MemoryModel.content).where(MemoryModel.id == mem["memory_id"]).limit(1)
+                )
+                content = row.scalar_one_or_none()
+                if content:
+                    snippet = content[:80] + ("..." if len(content) > 80 else "")
+        except Exception:
+            pass
+        
+        results.append({
+            **mem,
+            "content_snippet": snippet,
+        })
+    
+    return {"memories": results, "count": len(results)}

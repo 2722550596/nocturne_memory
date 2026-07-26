@@ -44,14 +44,26 @@ class SearchIndexer:
     # -----------------------------------------------------------------
 
     @staticmethod
-    def _to_sqlite_match_query(query: str) -> str:
-        """Convert free text into a conservative FTS5 MATCH expression."""
+    def _to_sqlite_match_query(query: str, *, use_or: bool = False) -> str:
+        """Convert free text into an FTS5 MATCH expression.
+
+        use_or=False (default) produces an AND query for strict matching.
+        use_or=True produces an OR query for fallback recall.
+        """
         normalized = expand_query_terms(query)
         tokens = [token.replace('"', '""') for token in normalized.split() if token]
         if not tokens:
             raw = query.strip().replace('"', '""')
             return f'"{raw}"' if raw else ""
-        return " AND ".join(f'"{token}"' for token in tokens)
+        op = " OR " if use_or else " AND "
+        return op.join(f'"{token}"' for token in tokens)
+
+    @staticmethod
+    def _to_or_query(query: str) -> str:
+        """Build an OR-separated token string for PostgreSQL websearch_to_tsquery."""
+        normalized = expand_query_terms(query)
+        tokens = [t for t in normalized.split() if t]
+        return " OR ".join(tokens)
 
     @staticmethod
     def _format_search_snippet(content: str, query: str) -> str:
@@ -276,117 +288,164 @@ class SearchIndexer:
     # Public search API
     # -----------------------------------------------------------------
 
-    async def search(
-        self, query: str, limit: int = 10, domain: Optional[str] = None, namespace: str = ""
+    async def _search_pass(
+        self,
+        session,
+        query: str,
+        *,
+        use_or: bool = False,
+        limit: int = 10,
+        domain: Optional[str] = None,
+        namespace: str = "",
     ) -> List[Dict[str, Any]]:
-        """Search memories by path and content using the derived FTS index."""
-        async with self._session() as session:
-            candidate_limit = max(limit * 5, 50)
-            params: Dict[str, Any] = {
-                "candidate_limit": candidate_limit,
-                "namespace": namespace,
-            }
-            domain_clause = ""
-            if domain is not None:
-                params["domain"] = domain
-                domain_clause = "AND sd.domain = :domain"
+        """Single-pass search. Returns formatted match dicts (may include dupes across passes)."""
+        candidate_limit = max(limit * 5, 50)
+        params: Dict[str, Any] = {
+            "candidate_limit": candidate_limit,
+            "namespace": namespace,
+        }
+        domain_clause = ""
+        if domain is not None:
+            params["domain"] = domain
+            domain_clause = "AND sd.domain = :domain"
 
-            if self.db_type == "sqlite":
-                match_query = self._to_sqlite_match_query(query)
-                if not match_query:
-                    return []
+        if self.db_type == "sqlite":
+            match_query = self._to_sqlite_match_query(query, use_or=use_or)
+            if not match_query:
+                return []
 
-                params["match_query"] = match_query
-                result = await session.execute(
-                    text(
-                        f"""
-                        SELECT
-                            sd.domain,
-                            sd.path,
-                            sd.node_uuid,
-                            sd.uri,
-                            sd.priority,
-                            sd.content,
-                            sd.disclosure,
-                            bm25(search_documents_fts, 0.0, 0.0, 2.5, 0.0, 2.0, 1.0, 1.0, 0.75) AS score
-                        FROM search_documents AS sd
-                        JOIN search_documents_fts
-                          ON search_documents_fts.namespace = sd.namespace
-                         AND search_documents_fts.domain = sd.domain
-                         AND search_documents_fts.path = sd.path
-                        WHERE search_documents_fts MATCH :match_query
-                          AND sd.namespace = :namespace
-                          {domain_clause}
-                        ORDER BY score ASC, sd.priority ASC, length(sd.path) ASC
-                        LIMIT :candidate_limit
-                        """
-                    ),
-                    params,
-                )
+            params["match_query"] = match_query
+            result = await session.execute(
+                text(
+                    f"""
+                    SELECT
+                        sd.domain,
+                        sd.path,
+                        sd.node_uuid,
+                        sd.uri,
+                        sd.priority,
+                        sd.content,
+                        sd.disclosure,
+                        bm25(search_documents_fts, 0.0, 0.0, 2.5, 0.0, 2.0, 1.0, 1.0, 0.75) AS score
+                    FROM search_documents AS sd
+                    JOIN search_documents_fts
+                      ON search_documents_fts.namespace = sd.namespace
+                     AND search_documents_fts.domain = sd.domain
+                     AND search_documents_fts.path = sd.path
+                    WHERE search_documents_fts MATCH :match_query
+                      AND sd.namespace = :namespace
+                      {domain_clause}
+                    ORDER BY score ASC, sd.priority ASC, length(sd.path) ASC
+                    LIMIT :candidate_limit
+                    """
+                ),
+                params,
+            )
+        else:
+            if use_or:
+                ts_query_str = self._to_or_query(query)
             else:
-                normalized = expand_query_terms(query)
-                if not normalized:
-                    return []
+                ts_query_str = expand_query_terms(query)
+            if not ts_query_str:
+                return []
 
-                params["ts_query"] = normalized
-                result = await session.execute(
-                    text(
-                        f"""
-                        SELECT
-                            sd.domain,
-                            sd.path,
-                            sd.node_uuid,
-                            sd.uri,
-                            sd.priority,
-                            sd.content,
-                            sd.disclosure,
-                            ts_rank_cd(
-                                to_tsvector(
-                                    'simple',
-                                    coalesce(sd.path, '') || ' ' ||
-                                    coalesce(sd.uri, '') || ' ' ||
-                                    coalesce(sd.content, '') || ' ' ||
-                                    coalesce(sd.disclosure, '') || ' ' ||
-                                    coalesce(sd.search_terms, '')
-                                ),
-                                websearch_to_tsquery('simple', :ts_query)
-                            ) AS score
-                        FROM search_documents AS sd
-                        WHERE sd.namespace = :namespace
-                          AND to_tsvector(
+            params["ts_query"] = ts_query_str
+            # Both passes use websearch_to_tsquery:
+            # AND pass: unquoted spaces → implicit AND
+            # OR pass:  explicit "OR" keyword between tokens
+            result = await session.execute(
+                text(
+                    f"""
+                    SELECT
+                        sd.domain,
+                        sd.path,
+                        sd.node_uuid,
+                        sd.uri,
+                        sd.priority,
+                        sd.content,
+                        sd.disclosure,
+                        ts_rank_cd(
+                            to_tsvector(
                                 'simple',
                                 coalesce(sd.path, '') || ' ' ||
                                 coalesce(sd.uri, '') || ' ' ||
                                 coalesce(sd.content, '') || ' ' ||
                                 coalesce(sd.disclosure, '') || ' ' ||
                                 coalesce(sd.search_terms, '')
-                              ) @@ websearch_to_tsquery('simple', :ts_query)
-                          {domain_clause}
-                        ORDER BY score DESC, sd.priority ASC, char_length(sd.path) ASC
-                        LIMIT :candidate_limit
-                        """
-                    ),
-                    params,
-                )
+                            ),
+                            websearch_to_tsquery('simple', :ts_query)
+                        ) AS score
+                    FROM search_documents AS sd
+                    WHERE sd.namespace = :namespace
+                      AND to_tsvector(
+                            'simple',
+                            coalesce(sd.path, '') || ' ' ||
+                            coalesce(sd.uri, '') || ' ' ||
+                            coalesce(sd.content, '') || ' ' ||
+                            coalesce(sd.disclosure, '') || ' ' ||
+                            coalesce(sd.search_terms, '')
+                          ) @@ websearch_to_tsquery('simple', :ts_query)
+                      {domain_clause}
+                    ORDER BY score DESC, sd.priority ASC, char_length(sd.path) ASC
+                    LIMIT :candidate_limit
+                    """
+                ),
+                params,
+            )
 
-            matches = []
-            seen_nodes = set()
+        rows = []
+        for row in result.mappings():
+            rows.append(
+                {
+                    "domain": row["domain"],
+                    "path": row["path"],
+                    "node_uuid": row["node_uuid"],
+                    "uri": row["uri"],
+                    "name": row["path"].rsplit("/", 1)[-1],
+                    "snippet": self._format_search_snippet(row["content"], query),
+                    "priority": row["priority"],
+                    "disclosure": row["disclosure"],
+                    "score": float(row["score"]),
+                }
+            )
+        return rows
 
-            for row in result.mappings():
+    async def search(
+        self, query: str, limit: int = 10, domain: Optional[str] = None, namespace: str = ""
+    ) -> List[Dict[str, Any]]:
+        """Search memories with AND-first, OR-fallback strategy.
+
+        1. Strict AND pass — all query tokens must appear. Highest precision.
+        2. If AND yields fewer than *limit* results, run an OR pass and
+           merge, keeping AND results at the top.
+        """
+        async with self._session() as session:
+            # Pass 1: AND (strict)
+            and_rows = await self._search_pass(
+                session, query, use_or=False, limit=limit, domain=domain, namespace=namespace
+            )
+
+            matches: List[Dict[str, Any]] = []
+            seen_nodes: set = set()
+
+            for row in and_rows:
                 if row["node_uuid"] in seen_nodes:
                     continue
                 seen_nodes.add(row["node_uuid"])
-                matches.append(
-                    {
-                        "domain": row["domain"],
-                        "path": row["path"],
-                        "uri": row["uri"],
-                        "name": row["path"].rsplit("/", 1)[-1],
-                        "snippet": self._format_search_snippet(row["content"], query),
-                        "priority": row["priority"],
-                        "disclosure": row["disclosure"],
-                    }
-                )
+                matches.append({k: v for k, v in row.items() if k != "score"})
+                if len(matches) >= limit:
+                    return matches
+
+            # Pass 2: OR (fallback) — fill remaining slots
+            or_rows = await self._search_pass(
+                session, query, use_or=True, limit=limit, domain=domain, namespace=namespace
+            )
+
+            for row in or_rows:
+                if row["node_uuid"] in seen_nodes:
+                    continue
+                seen_nodes.add(row["node_uuid"])
+                matches.append({k: v for k, v in row.items() if k != "score"})
                 if len(matches) >= limit:
                     break
 

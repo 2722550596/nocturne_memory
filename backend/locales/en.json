@@ -34,6 +34,7 @@
       "db_create_failed": "Failed to create database: {error}",
       "db_connected": "Connection successful",
       "db_failed": "Connection failed: {error}",
+      "db_swap_failed": "Failed to switch database: {error}",
       "open_folder_docker": "Open folder is not available in Docker deployments. Access the file via the mounted volume on the host.",
       "sqlite_only": "Only available for SQLite databases",
       "parse_path_failed": "Could not parse database path from URL",

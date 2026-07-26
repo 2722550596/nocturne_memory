@@ -16,7 +16,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 import config as _cfg
 from auth import enforce_network_auth
 from mcp_server import mcp
-from web_app import build_web_app, default_lifespan
+from web_app import build_web_app
 
 
 def main():
@@ -41,7 +41,6 @@ def main():
     @contextlib.asynccontextmanager
     async def combined_lifespan(app):
         async with contextlib.AsyncExitStack() as stack:
-            await stack.enter_async_context(default_lifespan(app))
             await stack.enter_async_context(sse_asgi_app.router.lifespan_context(app))
             await stack.enter_async_context(streamable_asgi_app.router.lifespan_context(app))
             yield

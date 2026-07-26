@@ -441,6 +441,8 @@ class GraphService:
         Returns stale nodes and crowded parent nodes.
         """
         from datetime import datetime, timedelta
+        if priority_thresholds is None:
+            priority_thresholds = {0: 3, 1: 7, 2: 14}
             
         async with self.session() as session:
             # First find when we actually started tracking last_accessed_at

@@ -58,13 +58,7 @@ def _ensure_initialized():
     from .graph import GraphService
     from .presets import PresetService
 
-    # _resolve_database_url() has already put backend/ on sys.path.
-    import config
-    _db_manager = DatabaseManager(
-        database_url,
-        pool_size=config.get("db_pool_size"),
-        max_overflow=config.get("db_max_overflow"),
-    )
+    _db_manager = DatabaseManager(database_url)
     _search_indexer = SearchIndexer(_db_manager)
     _glossary_service = GlossaryService(_db_manager, _search_indexer)
     _graph_service = GraphService(_db_manager, _search_indexer)
@@ -108,12 +102,25 @@ async def close_db():
     _preset_service = None
 
 
+async def hot_swap_database():
+    """Hot-swap the database connection without restarting the server.
+
+    Must be called *after* updating config.json with the new database_url.
+    Closes all old connections, disposes the engine, and re-initialises
+    everything from the current config value.
+    """
+    await close_db()
+    _ensure_initialized()
+    await _db_manager.init_db()
+
+
 __all__ = [
     "DatabaseManager",
     "get_db_manager", "get_graph_service",
     "get_search_indexer", "get_glossary_service",
     "get_preset_service",
     "close_db",
+    "hot_swap_database",
     "ChangesetStore", "get_changeset_store",
     "get_namespace", "set_namespace",
     "Base", "ROOT_NODE_UUID", "Node", "Memory", "Edge", "Path",

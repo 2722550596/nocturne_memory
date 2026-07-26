@@ -827,6 +827,23 @@ async def list_deprecated_memories():
     return {"count": len(memories), "memories": memories}
 
 
+
+@router.post("/deprecated/{memory_id}/rollback")
+async def rollback_deprecated_memory(memory_id: int, namespace: str = ""):
+    """
+    Roll back a deprecated memory to active status.
+    
+    Restores the specified deprecated memory as the active version,
+    deprecating whatever is currently active for the same node.
+    """
+    from db import get_namespace
+    graph = get_graph_service()
+    ns = namespace or get_namespace()
+    try:
+        result = await graph.rollback_to_memory(memory_id, namespace=ns)
+        return {"success": True, **result}
+    except ValueError as e:
+        raise HTTPException(404, str(e))
 @router.delete("/memories/{memory_id}")
 async def permanently_delete_memory(memory_id: int):
     """Permanently purge a deprecated memory from the DB (manual GC)."""
