@@ -57,37 +57,18 @@ async def fetch_and_format_memory(uri: str, track_access: bool = False) -> str:
     disp_path = memory.get("path", "unknown")
     disp_uri = make_uri(disp_domain, disp_path)
 
-    lines.append("=" * 60)
-    lines.append("")
-    lines.append(f"MEMORY: {disp_uri}")
-    lines.append(f"Memory ID: {memory.get('id')}")
-    lines.append(f"Other Aliases: {memory.get('alias_count', 0)}")
-    lines.append(f"Priority: {memory.get('priority', 0)}")
+    lines.append(f"# [{disp_uri}]")
     
-    created_at = memory.get("created_at")
-    if created_at:
-        try:
-            dt = datetime.fromisoformat(created_at)
-            lines.append(f"Last Modified: {dt.strftime('%Y-%m-%d %H:%M:%S')}")
-        except Exception:
-            lines.append(f"Last Modified: {created_at}")
-    else:
-        lines.append("Last Modified: (unknown)")
-
     disclosure = memory.get("disclosure")
     if disclosure:
-        lines.append(f"Disclosure: {disclosure}")
-    else:
-        lines.append("Disclosure: (not set)")
+        lines.append(f"> (想起条件: {disclosure})")
 
     node_keywords = await glossary.get_glossary_for_node(memory["node_uuid"], namespace=get_namespace())
     if node_keywords:
-        lines.append(f"Keywords: [{', '.join(node_keywords)}]")
-    else:
-        lines.append("Keywords: (none)")
+        lines.append(f"> (标签: {', '.join(node_keywords)})")
 
     lines.append("")
-    lines.append("=" * 60)
+    lines.append("---")
     lines.append("")
 
     content = memory.get("content", "(empty)")
@@ -118,21 +99,16 @@ async def fetch_and_format_memory(uri: str, track_access: bool = False) -> str:
                     lines_to_add.append(f"- {kw_str} -> {target_uri}")
 
             if lines_to_add:
-                lines.append("=" * 60)
-                lines.append("")
-                lines.append("GLOSSARY (keywords detected in this content)")
-                lines.append("")
+                lines.append("---")
+                lines.append("**相关联想:**")
                 lines.extend(lines_to_add)
                 lines.append("")
     except Exception:
         pass
 
     if children:
-        lines.append("=" * 60)
-        lines.append("")
-        lines.append("CHILD MEMORIES (Use 'read_memory' with URI to access)")
-        lines.append("")
-        lines.append("=" * 60)
+        lines.append("---")
+        lines.append("**更深层的记忆:**")
         lines.append("")
 
         for child in children:
@@ -141,18 +117,11 @@ async def fetch_and_format_memory(uri: str, track_access: bool = False) -> str:
             child_uri = make_uri(child_domain, child_path)
 
             child_disclosure = child.get("disclosure")
-            snippet = child.get("content_snippet", "")
-
-            lines.append(f"- URI: {child_uri}  ")
-            lines.append(f"  Priority: {child.get('priority', 0)}  ")
-
+            
             if child_disclosure:
-                lines.append(f"  When to recall: {child_disclosure}  ")
+                lines.append(f"- {child_uri} ({child_disclosure})")
             else:
-                lines.append("  When to recall: (not set)  ")
-                lines.append(f"  Snippet: {snippet}  ")
-
-            lines.append("")
+                lines.append(f"- {child_uri}")
 
     return "\n".join(lines)
 
@@ -173,26 +142,24 @@ async def generate_boot_memory_view(core_memory_uris: List[str]) -> str:
             failed.append(f"- {uri}: {str(e)}")
 
     output_parts = []
-
-    output_parts.append("# Core Memories")
-    output_parts.append(f"# Loaded: {loaded}/{len(core_memory_uris)} memories")
+    output_parts.append("# 核心记忆 (Core Memories)")
+    output_parts.append(f"> 载入状态: {loaded}/{len(core_memory_uris)} 条记忆已浮现")
     output_parts.append("")
 
     if failed:
-        output_parts.append("## Failed to load:")
+        output_parts.append("## 载入失败:")
         output_parts.extend(failed)
         output_parts.append("")
 
     if results:
-        output_parts.append("## Contents:")
+        output_parts.append("## 记忆内容:")
         output_parts.append("")
         output_parts.append(
-            "For a memory index, use: system://index/<domain> (e.g. system://index/core)"
+            "(索引建议: system://index/<domain>；近期回顾: system://recent)"
         )
-        output_parts.append("For recent memories, use: system://recent")
         output_parts.extend(results)
     else:
-        output_parts.append("(No core memories loaded. Run migration first.)")
+        output_parts.append("(目前没有核心记忆浮现。)")
 
     try:
         recent_view = await generate_recent_memories_view(limit=5)
@@ -210,14 +177,12 @@ async def generate_memory_index_view(domain_filter: Optional[str] = None) -> str
     """
     Generate a memory index view.
 
-    Public callers should use `system://index/<domain>`. Passing `None`
     keeps the helper usable for internal all-domain views.
 
     Node-centric: each conceptual entity (node_uuid) appears once per domain,
     with aliases within the same domain folded underneath its primary path.
     """
-    from mcp_server import DEFAULT_DOMAIN, make_uri
-
+    from mcp_server import make_uri, DEFAULT_DOMAIN
     graph = get_graph_service()
 
     try:
@@ -252,50 +217,36 @@ async def generate_memory_index_view(domain_filter: Optional[str] = None) -> str
 
         unique_nodes_count = len(set(nid for _, nid in node_groups.keys()))
         lines = [
-            "# Memory Index",
-            f"# Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-            f"# Domain Filter: {domain_filter}"
-            if domain_filter
-            else "# Domain Filter: None (All Domains)",
-            f"# Total: {unique_nodes_count} unique nodes",
-            "#",
-            "# \u26a0\ufe0f ATTENTION (LLM):",
-            "# This index ONLY shows ONE primary path per memory node.",
-            "# Other aliases, triggers, and child nodes located under those hidden aliases ARE NOT SHOWN HERE.",
-            "# DO NOT assume the children shown here are the ONLY children of a node.",
-            "# To see ALL paths, aliases, and triggers for a specific memory, you MUST use `read_memory()` on its URI.",
-            "#",
-            "# Legend: [#ID] = Memory ID, [\u2605N] = priority (lower = higher)",
+            "# 记忆索引 (Memory Index)",
+            f"> 生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            f"> 领域过滤: {domain_filter}" if domain_filter else "> 领域过滤: 全部",
+            f"> 总计: {unique_nodes_count} 个概念节点",
             "",
         ]
 
         for domain_name in sorted(domains.keys()):
             if domain_filter and domain_name != domain_filter:
                 continue
-            lines.append("# " + "\u2550" * 38)
-            lines.append(f"# DOMAIN: {domain_name}://")
-            lines.append("# " + "\u2550" * 38)
+            lines.append("---")
+            lines.append(f"## 领域: {domain_name}://")
             lines.append("")
 
             for group_name in sorted(domains[domain_name].keys()):
-                lines.append(f"## {group_name}")
+                lines.append(f"### {group_name}")
                 for primary in sorted(
                     domains[domain_name][group_name],
                     key=lambda x: x["path"],
                 ):
                     uri = primary.get("uri", make_uri(domain_name, primary["path"]))
                     priority = primary.get("priority", 0)
-                    memory_id = primary.get("memory_id", "?")
                     imp_str = f" [\u2605{priority}]"
-                    lines.append(f"  - {uri} [#{memory_id}]{imp_str}")
+                    lines.append(f"- {uri}{imp_str}")
                 lines.append("")
 
         return "\n".join(lines)
 
     except Exception as e:
         return t("system.error_index").format(error=str(e))
-
-
 async def generate_recent_memories_view(limit: int = 10) -> str:
     """
     Generate a view of recently modified memories (system://recent).
@@ -309,15 +260,15 @@ async def generate_recent_memories_view(limit: int = 10) -> str:
         results = await graph.get_recent_memories(limit=limit, namespace=get_namespace())
 
         lines = []
-        lines.append("# Recently Modified Memories")
-        lines.append(f"# Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        lines.append("# 最近修改的记忆 (Recently Modified)")
+        lines.append(f"> 生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         lines.append(
-            f"# Showing: {len(results)} most recent entries (requested: {limit})"
+            f"> 显示范围: 最近 {len(results)} 条记录"
         )
         lines.append("")
 
         if not results:
-            lines.append("(No memories found.)")
+            lines.append("(没有找到相关的记忆。)")
             return "\n".join(lines)
 
         for i, item in enumerate(results, 1):
@@ -331,15 +282,14 @@ async def generate_recent_memories_view(limit: int = 10) -> str:
             else:
                 modified = raw_ts or "unknown"
 
-            imp_str = f"\u2605{priority}"
+            imp_str = f"[\u2605{priority}]"
 
-            lines.append(f"{i}. {uri}  [{imp_str}]  modified: {modified}")
+            lines.append(f"{i}. {uri} {imp_str} (修改时间: {modified})")
             if disclosure:
-                lines.append(f"   disclosure: {disclosure}")
+                lines.append(f"   想起条件: {disclosure}")
             else:
-                lines.append("   disclosure: (NOT SET \u2014 consider adding one)")
+                lines.append("   想起条件: (未设置)")
             lines.append("")
-
         return "\n".join(lines)
 
     except Exception as e:
@@ -366,17 +316,17 @@ async def generate_glossary_index_view() -> str:
                 })
 
         lines = [
-            "# Glossary Index",
-            f"# Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-            f"# Total: {len(entries)} keywords",
+            "# 标签/触发词索引 (Glossary Index)",
+            f"> 生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            f"> 总计: {len(entries)} 个关键词",
             "",
         ]
 
         if not entries:
-            lines.append("(No glossary keywords defined yet.)")
+            lines.append("(目前还没有设置任何标签。)")
             lines.append("")
             lines.append(
-                "Use manage_triggers(uri, add=[...]) to bind trigger words to memory nodes."
+                "提示：可以使用 tag_memory(uri, add=['关键词']) 来为记忆添加关联词。"
             )
             return "\n".join(lines)
 
