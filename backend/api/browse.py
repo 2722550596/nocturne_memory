@@ -285,9 +285,9 @@ async def get_node(
 
 @router.put("/node")
 async def update_node(
+    body: NodeUpdate,
     path: str = Query(...),
     domain: str = Query("core"),
-    body: NodeUpdate = ...
 ):
     """Update a node's content."""
     graph = get_graph_service()

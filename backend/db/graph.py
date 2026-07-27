@@ -1448,33 +1448,26 @@ class GraphService:
             if content is not None:
                 rows_before["memories"] = [serialize_memory_ref(old_memory)]
 
+                # If content changed, use provided timestamp or carry over existing one
+                target_timestamp = world_timestamp if world_timestamp is not None else old_memory.world_timestamp
+
                 new_memory = await self._insert_memory(
                     session, node_uuid, content, 
                     deprecated=True,
-                    world_timestamp=world_timestamp
-                )
-
-                vals = {"deprecated": False, "migrated_to": None}
-                if world_timestamp is not None:
-                    vals["world_timestamp"] = world_timestamp
-
-                await session.execute(
-                    update(Memory)
-                    .where(Memory.id == new_memory_id)
-                    .values(**vals)
-                )
-            elif world_timestamp is not None:
-                # If only world_timestamp changed (no content change)
-                await session.execute(
-                    update(Memory)
-                    .where(Memory.id == old_id)
-                    .values(world_timestamp=world_timestamp)
+                    world_timestamp=target_timestamp
                 )
                 new_memory_id = new_memory.id
+
                 await self._deprecate_node_memories(
                     session,
                     node_uuid,
                     successor_id=new_memory_id,
+                )
+
+                await session.execute(
+                    update(Memory)
+                    .where(Memory.id == new_memory_id)
+                    .values(deprecated=False, migrated_to=None)
                 )
 
                 await session.flush()
@@ -1484,8 +1477,14 @@ class GraphService:
                 rows_after["memories"] = [
                     serialize_memory_ref(m) for m in updated.scalars().all()
                 ]
-
-            if content is None:
+            else:
+                # content didn't change. We might update world_timestamp in-place.
+                if world_timestamp is not None:
+                    old_memory.world_timestamp = world_timestamp
+                    session.add(old_memory)
+                    rows_after["memories"] = [serialize_memory_ref(old_memory)]
+                
+                # Ensure edge changes are flushed if no new memory row was created
                 session.add(path_obj)
 
             await self._search.refresh_search_documents_for_node(node_uuid, session=session, namespace=namespace, refresh_all_namespaces=True)
