@@ -162,6 +162,7 @@ export default function MemoryBrowser() {
     setEditDisclosure(data.node?.disclosure || '');
     setEditPriority(data.node?.priority ?? 0);
     setEditWorldTimestamp(data.node?.world_timestamp || '');
+    setEditing(true);
   };
 
   const cancelEditing = () => {
