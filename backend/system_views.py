@@ -69,12 +69,9 @@ async def fetch_and_format_memory(uri: str, track_access: bool = False) -> str:
         if mem_world_time:
             rel_str = calculate_relative_world_time(mem_world_time, curr_world_time)
             if rel_str:
-                lines.append(f"> (发生于: {mem_world_time}，约 {rel_str})")
+                lines.append(f"> (发生于: {mem_world_time}，{rel_str})")
             else:
                 lines.append(f"> (发生于: {mem_world_time})")
-        
-        # Always show current anchor to help LLM context
-        lines.append(f"> (当前世界时间: {curr_world_time})")
 
     disclosure = memory.get("disclosure")
     if disclosure:
@@ -432,7 +429,7 @@ async def _format_memory_clean(uri: str, ns: str, graph, max_children: int = 3) 
         if mem_world_time:
             rel_str = calculate_relative_world_time(mem_world_time, curr_world_time)
             if rel_str:
-                lines.append(f"> (发生于: {mem_world_time}，约 {rel_str})")
+                lines.append(f"> (发生于: {mem_world_time}，{rel_str})")
             else:
                 lines.append(f"> (发生于: {mem_world_time})")
 
@@ -520,7 +517,7 @@ async def _format_recent_domain_clean(domain: str, ns: str, graph, limit: int) -
             if mem_world_time:
                 rel_str = calculate_relative_world_time(mem_world_time, curr_world_time)
                 if rel_str:
-                    lines.append(f"> (发生于: {mem_world_time}，约 {rel_str})")
+                    lines.append(f"> (发生于: {mem_world_time}，{rel_str})")
                 else:
                     lines.append(f"> (发生于: {mem_world_time})")
 
@@ -741,7 +738,10 @@ def parse_world_date(date_str: str) -> Optional[date]:
 
 
 def calculate_relative_world_time(target_str: str, current_str: str) -> str:
-    """Calculate relative time string between two world dates."""
+    """
+    Calculate relative time string between two world dates.
+    Uses fuzzy logic (weeks, months, years) to sound more natural for RP contexts.
+    """
     target = parse_world_date(target_str)
     current = parse_world_date(current_str)
 
@@ -749,17 +749,27 @@ def calculate_relative_world_time(target_str: str, current_str: str) -> str:
         return ""
 
     diff = (target - current).days
+    abs_diff = abs(diff)
+    is_future = diff > 0
 
-    if diff == 0:
+    if abs_diff == 0:
         return "今天"
-    elif diff == -1:
-        return "昨天"
-    elif diff == 1:
-        return "明天"
-    elif diff > 0:
-        return f"{diff} 天后"
+    elif abs_diff == 1:
+        return "明天" if is_future else "昨天"
+    elif abs_diff == 2:
+        return "后天" if is_future else "前天"
+
+    if abs_diff < 7:
+        val, unit = abs_diff, "天"
+    elif abs_diff < 30:
+        val, unit = abs_diff // 7, "周"
+    elif abs_diff < 365:
+        val, unit = abs_diff // 30, "个月"
     else:
-        return f"{-diff} 天前"
+        val, unit = abs_diff // 365, "年"
+
+    direction = "后" if is_future else "前"
+    return f"约 {val} {unit}{direction}"
 
 
 def parse_relative_offset(offset_str: str, current_str: str) -> Optional[str]:

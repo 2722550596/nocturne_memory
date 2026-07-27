@@ -371,10 +371,11 @@ async def browse_memory(uri: str) -> str:
 
         特殊系统视图（不需要记忆也看得到）：
         - system://boot        : 醒来时最先看到的记忆
-        - system://wakeup     : boot 记忆 + 最近场景历史
-        - system://wakeup/N   : 同上，显示 N 条历史（如 system://wakeup/10）
-        - system://memory-slot/<type> : 针对 Pi Preset Slot 的特定视图 (boot/history/state)
-        - system://glossary   : 所有触发词索引
+        - system://wakeup      : boot 记忆 + 最近场景历史
+        - system://wakeup/N    : 同上，显示 N 条历史（如 system://wakeup/10）
+        - system://index/<domain>: 查看某个域下的所有记忆索引（如 system://index/core）
+        - system://recent/<N>  : 查看最近修改的 N 条记忆（如 system://recent/10）
+        - system://glossary    : 所有触发词索引
         - system://diagnostic/<domain>[/<days>] : 记忆健康检查
     """
     try:
@@ -439,7 +440,7 @@ async def search_memory(query: str, domain: Optional[str] = None, limit: int = 1
 
     Args:
         query: 搜索关键词
-        domain: 可选，限定在某个域名下搜索（如 "core"、"writer"）
+        domain: 可选，限定在某个域名下搜索（如 "core"、"history"）
         limit: 最多返回多少条（默认 10）
         sort_by_world: 是否按世界观时间排序（默认按现实时间）
     """
@@ -551,7 +552,14 @@ async def set_world_time(time: str) -> str:
         return f"设置失败: {str(e)}"
 
 @mcp.tool()
-async def remember_child_memory(parent_uri: str, content: str, importance: int = 5, when: str = "", title: Optional[str] = None) -> str:
+async def remember_child_memory(
+    parent_uri: str, 
+    content: str, 
+    importance: int = 5, 
+    when: str = "", 
+    title: Optional[str] = None,
+    time: Optional[str] = None,
+) -> str:
     """
     把一段新的记忆放在某个已有的父节点下。父节点通常是你自然
     会想到的那件事——当你想起来父节点的时候，这个子节点也会浮现。
@@ -574,14 +582,12 @@ async def remember_child_memory(parent_uri: str, content: str, importance: int =
               错误的例子：「当我觉得/意识到/注意到……」（意识不到就晚了）
               正确的例子：「当对方提到晚饭没吃」（外部信号，来得早）
         title: 可选的标题。一两个词概括内容，方便你以后扫一眼就知道是什么。
-               只能用字母、数字、连字符和下划线。
+                只能用字母、数字、连字符和下划线。
+        time: 可选。指定该记忆发生的世界观时间（YYYY-MM-DD 或相对位移如 "-1d"）。
+              如果没有提供，系统会优先尝试继承父节点的世界时间。
 
     Returns:
         新建记忆的 URI
-
-    Examples:
-        remember_memory("core://events", "我今天遇到的玩家……", importance=1, when="当对方问起今天遇到谁时", title="today_encounter")
-        remember_memory("core://identity", "我是xxx，来自……", importance=0, when="当有人问我是谁时", title="self_intro")
     """
     graph = get_graph_service()
 
@@ -595,6 +601,25 @@ async def remember_child_memory(parent_uri: str, content: str, importance: int =
 
         domain, parent_path = parse_uri(parent_uri)
 
+        # --- 时间解析与隐式继承逻辑 ---
+        final_world_time = None
+        config = get_config()
+        clock = config.get("world_clock", {})
+        current_world_time = clock.get("current_time")
+
+        if time:
+            from system_views import parse_relative_offset
+            offset_date = parse_relative_offset(time, current_world_time)
+            final_world_time = offset_date or time
+        else:
+            # 优先尝试从父节点继承世界时间
+            parent_mem = await graph.get_memory_by_path(parent_path, domain, namespace=get_namespace())
+            if parent_mem and parent_mem.get("world_timestamp"):
+                final_world_time = parent_mem.get("world_timestamp")
+            elif clock.get("auto_timestamp") and current_world_time:
+                # 回退到全局当前时间
+                final_world_time = current_world_time
+
         result = await graph.create_memory(
             parent_path=parent_path,
             content=content,
@@ -603,12 +628,16 @@ async def remember_child_memory(parent_uri: str, content: str, importance: int =
             disclosure=when,
             domain=domain,
             namespace=get_namespace(),
+            world_timestamp=final_world_time, # 注入时间
         )
 
         created_uri = result.get("uri", make_uri(domain, result["path"]))
         _record_rows(before_state={}, after_state=result.get("rows_after", {}))
 
         msg = f"记住了：「{created_uri}」"
+        if final_world_time:
+            msg += f" (发生于 {final_world_time})"
+            
         if result.get("path"):
             msg += f"\n\n新记的事已经放好了。你看看和它相关的其他记忆有没有什么要整理的？"
         return msg
@@ -1240,68 +1269,84 @@ async def organize_memory(
 
 @write_tool()
 async def archive_memory(
+    title: str,
+    history: str,
     mode: str = "char",
-    history: str = "",
     raw: Optional[str] = None,
+    time: Optional[str] = None,
 ) -> str:
     """把刚才发生的事存档到历史记录里。
 
     每轮对话或场景结束后，用这个工具把发生了什么记到 history 域。
     之后就可以通过「system://wakeup」来回想最近发生的事。
 
-    history 放整理的场景摘要，raw 放原始对话记录（可选）。
-
-    存档路径会自动按时间生成。
-
     Args:
-        mode: "char"（角色视角）或 "gm"（GM视角），默认 "char"
-        history: 场景摘要。整理过的、这段场景里发生了什么
-        raw: 原始记录。可选，完整的对话或事件记录
-
-    Examples:
-        archive_memory("char", "今天在酒馆遇到了一个陌生人……")
-        archive_memory("gm", "玩家在森林里发现了隐藏的洞穴……", "完整的对话记录……")
+        title: 场景的简短标题（如 "tavern_brawl" 或 "meet_tina"）。
+               只能包含字母、数字、下划线和连字符。这会成为记忆的路径。
+        history: 场景摘要。整理过的、这段场景里发生了什么。
+        mode: "char"（角色视角）或 "gm"（GM视角），默认 "char"。
+        raw: 原始记录。可选，完整的对话或事件记录。
+        time: 可选。存档对应的世界观时间（如 "2024-06-01" 或 "-1d"）。默认使用当前世界时间。
     """
     graph = get_graph_service()
 
     try:
-        from datetime import datetime
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        import re
         namespace = get_namespace()
 
         if not history.strip():
             return "history 不能为空。写一下刚才发生了什么。"
+            
+        if not title or not re.match(r"^[a-zA-Z0-9_-]+$", title):
+            return "title 必须提供，且只能包含字母、数字、连字符和下划线（如 'first_encounter'）。"
 
-        # 写入 history 域
-        history_path = f"scenes/{timestamp}"
+        # --- 世界观时间处理 ---
+        config = get_config()
+        clock = config.get("world_clock", {})
+        current_world_time = clock.get("current_time")
+
+        final_world_time = None
+        if time:
+            from system_views import parse_relative_offset
+            offset_date = parse_relative_offset(time, current_world_time)
+            final_world_time = offset_date or time
+        elif current_world_time:
+            final_world_time = current_world_time
+
+        # 写入 history 域（统一放在 scenes/ 目录下保持整洁）
         await graph.create_memory(
-            parent_path="",
+            parent_path="scenes",
             content=history,
             priority=5,
-            title=f"scene_{timestamp}",
+            title=title,
             disclosure="当回顾最近经历时",
             domain="history",
             namespace=namespace,
+            world_timestamp=final_world_time, 
         )
 
         if raw and raw.strip():
             await graph.create_memory(
-                parent_path="",
+                parent_path="scenes",
                 content=raw,
                 priority=5,
-                title=f"scene_{timestamp}_raw",
+                title=f"{title}_raw",
                 disclosure="",
                 domain="history_raw",
                 namespace=namespace,
+                world_timestamp=final_world_time, 
             )
 
-        return f"场景已存档（{mode}）：history://scenes/{timestamp}"
+        msg = f"场景已存档（{mode}）：history://scenes/{title}"
+        if final_world_time:
+            msg += f" (世界时间: {final_world_time})"
+            
+        return msg
 
     except ValueError as e:
         return f"存档失败：{str(e)}"
     except Exception as e:
         return f"存档失败：{str(e)}"
-
 
 # ── 回顾 ──────────────────────────────────────────────────────────────────
 
