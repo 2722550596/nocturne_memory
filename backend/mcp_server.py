@@ -527,55 +527,6 @@ async def remember_memory(uri: str, content: str, time: Optional[str] = None) ->
 
 
 @mcp.tool()
-async def edit_memory(uri: str, patch: str, time: Optional[str] = None) -> str:
-    """使用文本补丁（patch）来修改一段现有的记忆。
-
-    适合对长篇记忆进行局部修改。
-
-    Args:
-        uri: 记忆的 URI
-        patch: 补丁内容
-        time: 可选。更新该记忆发生的世界观时间。
-    """
-    try:
-        domain, path = parse_uri(uri)
-        graph = get_graph_service()
-        
-        # Handle world time parsing
-        final_world_time = None
-        if time:
-            config = get_config()
-            clock = config.get("world_clock", {})
-            current_world_time = clock.get("current_time")
-            from system_views import parse_relative_offset
-            offset_date = parse_relative_offset(time, current_world_time)
-            final_world_time = offset_date or time
-
-        memory = await graph.get_memory_by_path(path, domain, namespace=get_namespace())
-        if not memory:
-            return f"找不到记忆: {uri}"
-
-        original_content = memory.get("content", "")
-        new_content, applied_patch = try_normalized_patch(original_content, patch)
-
-        if new_content == original_content and not final_world_time:
-            return f"记忆内容未变动且未更新时间。"
-
-        await graph.update_memory(
-            path, new_content, domain, 
-            namespace=get_namespace(),
-            world_timestamp=final_world_time
-        )
-        
-        msg = f"已修改记忆: {uri}"
-        if final_world_time:
-            msg += f" (时间更新为: {final_world_time})"
-        return msg
-    except Exception as e:
-        return f"修改失败: {str(e)}"
-
-
-@mcp.tool()
 async def set_world_time(time: str) -> str:
     """设置当前世界观时间。
 
@@ -680,6 +631,7 @@ async def edit_memory(
     line_content: Optional[str] = None,
     importance: Optional[int] = None,
     when: Optional[str] = None,
+    time: Optional[str] = None,
 ) -> str:
     """修改一段记忆的内容。
 
@@ -704,7 +656,7 @@ async def edit_memory(
         line_content: [行编辑] 这一行的新内容
         importance: 可选，修改重要性
         when: 可选，修改想起条件
-
+        time: 可选，修改该记忆发生的世界观时间（如 "2024-06-01" 或 "-1d"）
     Examples:
         edit_memory("core://identity/habits", old_text="每天喝咖啡", new_text="每天喝茶")
         edit_memory("core://events/encounter_0302", append="\\n今天（3月3日）又遇到了他……")
@@ -712,6 +664,17 @@ async def edit_memory(
         edit_memory("core://schedule", importance=2)  # 只改重要性
     """
     graph = get_graph_service()
+
+    # Handle world time parsing
+    final_world_time = None
+    if time:
+        config = get_config()
+        clock = config.get("world_clock", {})
+        current_world_time = clock.get("current_time")
+        from system_views import parse_relative_offset
+        offset_date = parse_relative_offset(time, current_world_time)
+        final_world_time = offset_date or time
+
 
     try:
         domain, path = parse_uri(uri)
@@ -730,8 +693,8 @@ async def edit_memory(
             return "行编辑模式下需要提供 line_content（新内容）。"
         if line_content is not None and line is None:
             return "给了 line_content 但没给 line 行号。"
-        if old_text is None and append is None and line is None and importance is None and when is None:
-            return "没有要改的东西。至少提供一个编辑参数或修改重要性/想起条件。"
+        if old_text is None and append is None and line is None and importance is None and when is None and time is None:
+            return "没有要改的东西。至少提供一个编辑参数或修改时间/重要性/想起条件。"
 
         # ── 读取当前内容 ──
         memory = await graph.get_memory_by_path(path, domain, namespace=get_namespace())
@@ -793,6 +756,7 @@ async def edit_memory(
             disclosure=when,
             domain=domain,
             namespace=get_namespace(),
+            world_timestamp=final_world_time,
         )
 
         _record_rows(
@@ -800,7 +764,10 @@ async def edit_memory(
             after_state=result.get("rows_after", {}),
         )
 
-        return f"已经改好了：「{full_uri}」"
+        msg = f"已经改好了：「{full_uri}」"
+        if final_world_time:
+            msg += f" (时间更新为: {final_world_time})"
+        return msg
 
     except ValueError as e:
         return f"没改掉：{str(e)}"

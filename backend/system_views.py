@@ -403,7 +403,7 @@ async def generate_wakeup_view(boot_uris: List[str], history_limit: int = 5) -> 
 
 async def _format_memory_clean(uri: str, ns: str, graph, max_children: int = 3) -> str:
     """Format one memory in clean style: ### uri, disclosure, content, children."""
-    from mcp_server import parse_uri, make_uri, DEFAULT_DOMAIN
+    from mcp_server import parse_uri, make_uri, DEFAULT_DOMAIN, get_config
     domain, mem_path = parse_uri(uri)
     if not domain:
         domain = DEFAULT_DOMAIN
@@ -420,9 +420,22 @@ async def _format_memory_clean(uri: str, ns: str, graph, max_children: int = 3) 
     disp_path = detail.get("path", mem_path)
     disp_uri = make_uri(disp_domain, disp_path)
     disclosure = detail.get("disclosure")
-    
+    config = get_config()
+    world_clock = config.get("world_clock", {})
+    curr_world_time = world_clock.get("current_time")
+    mem_world_time = detail.get("world_timestamp")
+
     lines: List[str] = []
     lines.append(f"### {disp_uri}")
+
+    if curr_world_time:
+        if mem_world_time:
+            rel_str = calculate_relative_world_time(mem_world_time, curr_world_time)
+            if rel_str:
+                lines.append(f"> (发生于: {mem_world_time}，约 {rel_str})")
+            else:
+                lines.append(f"> (发生于: {mem_world_time})")
+
     if disclosure:
         lines.append(f"> {disclosure}")
     lines.append(content)
@@ -453,7 +466,7 @@ async def _format_memory_clean(uri: str, ns: str, graph, max_children: int = 3) 
 
 async def _format_recent_domain_clean(domain: str, ns: str, graph, limit: int) -> List[str]:
     """Get recent entries from a domain, formatted clean."""
-    from mcp_server import make_uri, DEFAULT_DOMAIN
+    from mcp_server import make_uri, DEFAULT_DOMAIN, get_config
     all_paths = await graph.get_all_paths(namespace=ns)
     
     # Deduplicate by node_uuid
@@ -482,6 +495,7 @@ async def _format_recent_domain_clean(domain: str, ns: str, graph, limit: int) -
                     "content": detail.get("content", ""),
                     "disclosure": detail.get("disclosure"),
                     "created_at": detail.get("created_at", ""),
+                    "world_timestamp": detail.get("world_timestamp"),
                     "node_uuid": detail.get("node_uuid"),
                 })
         except Exception:
@@ -494,7 +508,22 @@ async def _format_recent_domain_clean(domain: str, ns: str, graph, limit: int) -
     result = []
     for entry in detailed[:limit]:
         lines: List[str] = []
+        config = get_config()
+        world_clock = config.get("world_clock", {})
+        curr_world_time = world_clock.get("current_time")
+        mem_world_time = entry.get("world_timestamp")
+
+        lines: List[str] = []
         lines.append(f"### {entry['uri']}")
+
+        if curr_world_time:
+            if mem_world_time:
+                rel_str = calculate_relative_world_time(mem_world_time, curr_world_time)
+                if rel_str:
+                    lines.append(f"> (发生于: {mem_world_time}，约 {rel_str})")
+                else:
+                    lines.append(f"> (发生于: {mem_world_time})")
+
         if entry.get("disclosure"):
             lines.append(f"> {entry['disclosure']}")
         lines.append(entry["content"])
@@ -553,20 +582,28 @@ async def generate_memory_slot_view(slot_type: str, boot_uris: List[str] = None)
     graph = get_graph_service()
     ns = get_namespace()
     
+    from mcp_server import get_config
+    config = get_config()
+    world_clock = config.get("world_clock", {})
+    curr_world_time = world_clock.get("current_time")
+
     if slot_type == "boot":
         blocks = []
+        if curr_world_time:
+            blocks.append(f"> **当前世界时间: {curr_world_time}**")
+
         if boot_uris:
             for uri in boot_uris:
                 formatted = await _format_memory_clean(uri, ns, graph, max_children=3)
                 if formatted:
                     blocks.append(formatted)
-        
+
         recent_core = await _format_recent_core_index_clean(ns, graph, limit=5)
         if recent_core:
             blocks.append("## 最近动态\n" + "\n".join(recent_core))
         
         return "\n\n---\n\n".join(blocks)
-        
+
     elif slot_type == "history":
         history_blocks = await _format_recent_domain_clean("history", ns, graph, limit=5)
         if history_blocks:
