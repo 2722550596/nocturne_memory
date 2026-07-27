@@ -32,6 +32,7 @@ class SettingsUpdate(BaseModel):
     cors_origins: str | None = None
     public_readonly_mcp: bool | None = None
     locale: str | None = None
+    world_clock: dict | None = None
 
 
 class BootUriUpdate(BaseModel):
@@ -73,11 +74,8 @@ async def update_settings(body: SettingsUpdate):
     needs_restart = False
 
     fields = body.model_dump(exclude_unset=True)
-    
-    # Only locale is allowed to be explicitly set to None (to clear it).
-    # For all other fields, if they are None, we drop them to preserve partial-update semantics.
-    fields = {k: v for k, v in fields.items() if v is not None or k == "locale"}
-
+    # Special handling for dict fields to allow partial updates.
+    fields = {k: v for k, v in fields.items() if v is not None or k in ("locale", "world_clock")}
     _DOCKER_LOCKED = {"web_port", "host"}
     if _IN_DOCKER:
         locked = _DOCKER_LOCKED & fields.keys()

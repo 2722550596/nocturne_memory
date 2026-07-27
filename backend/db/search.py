@@ -326,6 +326,7 @@ class SearchIndexer:
                         sd.priority,
                         sd.content,
                         sd.disclosure,
+                        sd.world_timestamp,
                         bm25(search_documents_fts, 0.0, 0.0, 2.5, 0.0, 2.0, 1.0, 1.0, 0.75) AS score
                     FROM search_documents AS sd
                     JOIN search_documents_fts
@@ -364,6 +365,7 @@ class SearchIndexer:
                         sd.priority,
                         sd.content,
                         sd.disclosure,
+                        sd.world_timestamp,
                         ts_rank_cd(
                             to_tsvector(
                                 'simple',
@@ -405,6 +407,7 @@ class SearchIndexer:
                     "snippet": self._format_search_snippet(row["content"], query),
                     "priority": row["priority"],
                     "disclosure": row["disclosure"],
+                    "world_timestamp": row["world_timestamp"],
                     "score": float(row["score"]),
                 }
             )

@@ -15,6 +15,7 @@ import {
   FileText,
   Loader2,
   Plus,
+  Clock,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { api, getSettingsBootUris, toggleSettingsBootUri, deleteNode, searchMemories, createMemory, renameNode, addDomain, removeDomain, getDomains } from '../../lib/api';
@@ -66,6 +67,7 @@ export default function MemoryBrowser() {
   const [editContent, setEditContent] = useState('');
   const [editDisclosure, setEditDisclosure] = useState('');
   const [editPriority, setEditPriority] = useState(0);
+  const [editWorldTimestamp, setEditWorldTimestamp] = useState('');
   const [saving, setSaving] = useState(false);
   const [bootUris, setBootUris] = useState([]);
 
@@ -121,10 +123,10 @@ export default function MemoryBrowser() {
         }
 
         const res = await api.get('/browse/node', { params: { domain, path } });
-        setData({ node: null, children: [], breadcrumbs: [], ...(res.data || {}) });
         setEditContent(res.data.node?.content || '');
         setEditDisclosure(res.data.node?.disclosure || '');
         setEditPriority(res.data.node?.priority ?? 0);
+        setEditWorldTimestamp(res.data.node?.world_timestamp || '');
         setEditTitle(res.data.node?.name || '');
       } catch (err) {
         setError(err.response?.data?.detail || err.message);
@@ -159,7 +161,7 @@ export default function MemoryBrowser() {
     setEditContent(data.node?.content || '');
     setEditDisclosure(data.node?.disclosure || '');
     setEditPriority(data.node?.priority ?? 0);
-    setEditing(true);
+    setEditWorldTimestamp(data.node?.world_timestamp || '');
   };
 
   const cancelEditing = () => {
@@ -168,16 +170,17 @@ export default function MemoryBrowser() {
     setEditContent(data.node?.content || '');
     setEditDisclosure(data.node?.disclosure || '');
     setEditPriority(data.node?.priority ?? 0);
+    setEditWorldTimestamp(data.node?.world_timestamp || '');
   };
 
   const handleSave = async () => {
     setSaving(true);
     try {
       const titleChanged = editTitle !== (data.node?.name || '');
-      const payload = {};
       if (editContent !== (data.node?.content || '')) payload.content = editContent;
       if (editPriority !== (data.node?.priority ?? 0)) payload.priority = editPriority;
       if (editDisclosure !== (data.node?.disclosure || '')) payload.disclosure = editDisclosure;
+      if (editWorldTimestamp !== (data.node?.world_timestamp || '')) payload.world_timestamp = editWorldTimestamp;
 
       if (titleChanged) {
         const renameResult = await renameNode({
@@ -550,11 +553,22 @@ export default function MemoryBrowser() {
                                         <PriorityBadge priority={node.priority} size="lg" />
                                     </div>
                                     
-                                    {node.disclosure && !editing && (
-                                        <div className="inline-flex items-center gap-2 px-3 py-1.5 bg-amber-950/20 border border-amber-900/30 rounded-lg text-amber-500/80 text-xs max-w-full">
-                                            <AlertTriangle size={14} className="flex-shrink-0" />
-                                            <span className="font-medium mr-1">{t('memory.edit.disclosure_label')}</span>
-                                            <span className="italic truncate">{node.disclosure}</span>
+                                    {(node.disclosure || node.world_timestamp) && !editing && (
+                                        <div className="flex flex-wrap gap-2">
+                                            {node.disclosure && (
+                                                <div className="inline-flex items-center gap-2 px-3 py-1.5 bg-amber-950/20 border border-amber-900/30 rounded-lg text-amber-500/80 text-xs max-w-full">
+                                                    <AlertTriangle size={14} className="flex-shrink-0" />
+                                                    <span className="font-medium mr-1">{t('memory.edit.disclosure_label')}</span>
+                                                    <span className="italic truncate">{node.disclosure}</span>
+                                                </div>
+                                            )}
+                                            {node.world_timestamp && (
+                                                <div className="inline-flex items-center gap-2 px-3 py-1.5 bg-indigo-950/20 border border-indigo-900/30 rounded-lg text-indigo-400 text-xs max-w-full">
+                                                    <Clock size={14} className="flex-shrink-0" />
+                                                    <span className="font-medium mr-1">{t('memory.edit.world_timestamp_label') || '世界观时间'}</span>
+                                                    <span className="italic truncate">{node.world_timestamp}</span>
+                                                </div>
+                                            )}
                                         </div>
                                     )}
                                     
@@ -625,7 +639,7 @@ export default function MemoryBrowser() {
                             </div>
 
                             {editing && (
-                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 p-4 bg-slate-900/50 border border-slate-800/50 rounded-xl">
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 p-4 bg-slate-900/50 border border-slate-800/50 rounded-xl mb-4">
                                     <div className="space-y-1.5">
                                         <label className="flex items-center gap-1.5 text-xs font-medium text-slate-400">
                                             <Star size={12} />
@@ -641,6 +655,20 @@ export default function MemoryBrowser() {
                                         />
                                     </div>
                                     <div className="space-y-1.5">
+                                        <label className="flex items-center gap-1.5 text-xs font-medium text-slate-400">
+                                            <Clock size={12} />
+                                            {t('memory.edit.world_timestamp_label') || '世界观时间'}
+                                            <span className="text-slate-600 font-normal">{t('memory.edit.optional')}</span>
+                                        </label>
+                                        <input 
+                                            type="text"
+                                            value={editWorldTimestamp}
+                                            onChange={e => setEditWorldTimestamp(e.target.value)}
+                                            placeholder="YYYY-MM-DD"
+                                            className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200 font-mono focus:outline-none focus:border-indigo-500/50 transition-colors"
+                                        />
+                                    </div>
+                                    <div className="space-y-1.5 md:col-span-2">
                                         <label className="flex items-center gap-1.5 text-xs font-medium text-slate-400">
                                             <AlertTriangle size={12} />
                                             {t('memory.edit.disclosure')}

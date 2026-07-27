@@ -132,6 +132,11 @@ async def _ensure_frontend_built():
             file=sys.stderr,
         )
 
+def get_config() -> Dict[str, Any]:
+    """Public accessor for config (used by system_views)."""
+    return _cfg.get_all()
+
+
 
 @contextlib.asynccontextmanager
 async def lifespan(server: FastMCP):
@@ -427,7 +432,7 @@ async def browse_memory(uri: str) -> str:
 
 
 @mcp.tool()
-async def search_memory(query: str, domain: Optional[str] = None, limit: int = 10) -> str:
+async def search_memory(query: str, domain: Optional[str] = None, limit: int = 10, sort_by_world: bool = False) -> str:
     """搜索记忆。想不起 URI 的时候用这个来找。
 
     这是全文搜索，不是语义搜索。输入关键词就能找到相关记忆。
@@ -436,26 +441,31 @@ async def search_memory(query: str, domain: Optional[str] = None, limit: int = 1
         query: 搜索关键词
         domain: 可选，限定在某个域名下搜索（如 "core"、"writer"）
         limit: 最多返回多少条（默认 10）
-
-    Examples:
-        search_memory("咖啡")              # 搜所有域名
-        search_memory("约定", domain="core")  # 只搜核心记忆
+        sort_by_world: 是否按世界观时间排序（默认按现实时间）
     """
-    search = get_search_indexer()
+    graph = get_graph_service()
 
     try:
+        from mcp_server import get_valid_domains
         valid = get_valid_domains()
         if domain is not None and domain not in valid:
             return f"没有 '{domain}' 这个域名。可用的：{', '.join(valid)}"
 
-        results = await search.search(query, limit, domain, namespace=get_namespace())
+        results = await graph.search_memories(
+            query, domain, limit=limit, namespace=get_namespace()
+        )
+
+        if sort_by_world:
+            # Standardize dates for sorting, treat None as earliest
+            results.sort(key=lambda x: x.get("world_timestamp") or "0000-00-00", reverse=True)
 
         if not results:
             scope = f"在 {domain}" if domain else "所有域名"
-            return f"没找到和「{query}」相关的记忆（{scope}）。"
+            return f"{scope}里没有找到和「{query}」相关的记忆。"
 
         lines = [f"找到了 {len(results)} 条和「{query}」相关的记忆：", ""]
         for item in results:
+            from mcp_server import make_uri, DEFAULT_DOMAIN
             uri = item.get("uri", make_uri(item.get("domain", DEFAULT_DOMAIN), item["path"]))
             lines.append(f"- {uri}")
             lines.append(f"  重要性：{item['priority']}")
@@ -470,18 +480,128 @@ async def search_memory(query: str, domain: Optional[str] = None, limit: int = 1
         return f"搜索出错了：{str(e)}"
 
 
-# ── 创建 ──────────────────────────────────────────────────────────────────
+@mcp.tool()
+async def remember_memory(uri: str, content: str, time: Optional[str] = None) -> str:
+    """记下一段新的记忆。
 
-@write_tool()
-async def remember_memory(
-    parent_uri: str,
-    content: str,
-    importance: int,
-    when: str,
-    title: Optional[str] = None,
-) -> str:
-    """记下一件新的事。
+    Args:
+        uri: 记忆的路径（URI），例如 core://identity
+        content: 记忆的具体内容
+        time: 可选。指定该记忆发生的世界观时间（YYYY-MM-DD）。
+              也支持相对位移，如 "-1d"（昨天）, "+1y"（明年）。
+              如果未提供，且配置开启了自动计时，则使用当前世界时间。
+    """
+    try:
+        # Split URI into domain, parent_path, and title
+        domain, full_path = parse_uri(uri)
+        if "/" in full_path:
+            parent_path, title = full_path.rsplit("/", 1)
+        else:
+            parent_path = ""
+            title = full_path
 
+        # Handle world time parsing
+        final_world_time = None
+        config = get_config()
+        clock = config.get("world_clock", {})
+        current_world_time = clock.get("current_time")
+
+        if time:
+            from system_views import parse_relative_offset
+            # Try parsing as offset first
+            offset_date = parse_relative_offset(time, current_world_time)
+            final_world_time = offset_date or time
+        elif clock.get("auto_timestamp") and current_world_time:
+            final_world_time = current_world_time
+
+        graph = get_graph_service()
+        await graph.create_memory(
+            parent_path, content, priority=5, title=title, domain=domain, 
+            namespace=get_namespace(),
+            world_timestamp=final_world_time
+        )
+        
+        return f"已记下记忆: {uri}" + (f" (发生于 {final_world_time})" if final_world_time else "")
+    except Exception as e:
+        return f"记录失败: {str(e)}"
+
+
+@mcp.tool()
+async def edit_memory(uri: str, patch: str, time: Optional[str] = None) -> str:
+    """使用文本补丁（patch）来修改一段现有的记忆。
+
+    适合对长篇记忆进行局部修改。
+
+    Args:
+        uri: 记忆的 URI
+        patch: 补丁内容
+        time: 可选。更新该记忆发生的世界观时间。
+    """
+    try:
+        domain, path = parse_uri(uri)
+        graph = get_graph_service()
+        
+        # Handle world time parsing
+        final_world_time = None
+        if time:
+            config = get_config()
+            clock = config.get("world_clock", {})
+            current_world_time = clock.get("current_time")
+            from system_views import parse_relative_offset
+            offset_date = parse_relative_offset(time, current_world_time)
+            final_world_time = offset_date or time
+
+        memory = await graph.get_memory_by_path(path, domain, namespace=get_namespace())
+        if not memory:
+            return f"找不到记忆: {uri}"
+
+        original_content = memory.get("content", "")
+        new_content, applied_patch = try_normalized_patch(original_content, patch)
+
+        if new_content == original_content and not final_world_time:
+            return f"记忆内容未变动且未更新时间。"
+
+        await graph.update_memory(
+            path, new_content, domain, 
+            namespace=get_namespace(),
+            world_timestamp=final_world_time
+        )
+        
+        msg = f"已修改记忆: {uri}"
+        if final_world_time:
+            msg += f" (时间更新为: {final_world_time})"
+        return msg
+    except Exception as e:
+        return f"修改失败: {str(e)}"
+
+
+@mcp.tool()
+async def set_world_time(time: str) -> str:
+    """设置当前世界观时间。
+
+    改变此设置后，后续创建的记忆会自动关联到新时间，且在查看记忆时会更新“N天前”的计算参考。
+
+    Args:
+        time: 世界观日期（如 2024-06-05）或相对偏移量（如 "+1d"）。
+    """
+    try:
+        config_data = get_config()
+        clock = config_data.get("world_clock", {})
+        current_time = clock.get("current_time", "2024-06-01")
+        
+        from system_views import parse_relative_offset
+        new_time = parse_relative_offset(time, current_time) or time
+        
+        clock["current_time"] = new_time
+        _cfg.set_value("world_clock", clock)
+        
+        return f"当前世界时间已设置为: {new_time}"
+    except Exception as e:
+        return f"设置失败: {str(e)}"
+
+@mcp.tool()
+async def remember_child_memory(parent_uri: str, content: str, importance: int = 5, when: str = "", title: Optional[str] = None) -> str:
+    """
     把一段新的记忆放在某个已有的父节点下。父节点通常是你自然
     会想到的那件事——当你想起来父节点的时候，这个子节点也会浮现。
 

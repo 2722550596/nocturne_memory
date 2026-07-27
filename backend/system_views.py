@@ -16,6 +16,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from db import get_graph_service, get_glossary_service
 from db.namespace import get_namespace
 from locales import t
+import re
+from datetime import date
 
 
 async def fetch_and_format_memory(uri: str, track_access: bool = False) -> str:
@@ -23,8 +25,7 @@ async def fetch_and_format_memory(uri: str, track_access: bool = False) -> str:
     Fetch memory data and return a formatted string.
     Used by read_memory tool and boot view.
     """
-    from mcp_server import parse_uri, make_uri, DEFAULT_DOMAIN
-
+    from mcp_server import parse_uri, make_uri, DEFAULT_DOMAIN, get_config
     graph = get_graph_service()
     glossary = get_glossary_service()
     domain, path = parse_uri(uri)
@@ -56,9 +57,25 @@ async def fetch_and_format_memory(uri: str, track_access: bool = False) -> str:
     disp_domain = memory.get("domain", DEFAULT_DOMAIN)
     disp_path = memory.get("path", "unknown")
     disp_uri = make_uri(disp_domain, disp_path)
-
     lines.append(f"# [{disp_uri}]")
-    
+
+    # --- World Time Context ---
+    config = get_config()
+    world_clock = config.get("world_clock", {})
+    curr_world_time = world_clock.get("current_time")
+    mem_world_time = memory.get("world_timestamp")
+
+    if curr_world_time:
+        if mem_world_time:
+            rel_str = calculate_relative_world_time(mem_world_time, curr_world_time)
+            if rel_str:
+                lines.append(f"> (发生于: {mem_world_time}，约 {rel_str})")
+            else:
+                lines.append(f"> (发生于: {mem_world_time})")
+        
+        # Always show current anchor to help LLM context
+        lines.append(f"> (当前世界时间: {curr_world_time})")
+
     disclosure = memory.get("disclosure")
     if disclosure:
         lines.append(f"> (想起条件: {disclosure})")
@@ -142,7 +159,14 @@ async def generate_boot_memory_view(core_memory_uris: List[str]) -> str:
             failed.append(f"- {uri}: {str(e)}")
 
     output_parts = []
+    from mcp_server import get_config
+    config = get_config()
+    world_clock = config.get("world_clock", {})
+    curr_world_time = world_clock.get("current_time")
+
     output_parts.append("# 核心记忆 (Core Memories)")
+    if curr_world_time:
+        output_parts.append(f"> 当前世界时间: {curr_world_time}")
     output_parts.append(f"> 载入状态: {loaded}/{len(core_memory_uris)} 条记忆已浮现")
     output_parts.append("")
 
@@ -664,3 +688,75 @@ async def generate_diagnostic_view(domain: str, days_stale: int = 30, max_childr
 
     except Exception as e:
         return t("system.error_diagnostic").format(error=str(e))
+
+
+def parse_world_date(date_str: str) -> Optional[date]:
+    """Parse a world date string (YYYY-MM-DD)."""
+    try:
+        if not date_str or not isinstance(date_str, str):
+            return None
+        parts = date_str.split("-")
+        if len(parts) == 3:
+            return date(int(parts[0]), int(parts[1]), int(parts[2]))
+    except (ValueError, IndexError):
+        pass
+    return None
+
+
+def calculate_relative_world_time(target_str: str, current_str: str) -> str:
+    """Calculate relative time string between two world dates."""
+    target = parse_world_date(target_str)
+    current = parse_world_date(current_str)
+
+    if not target or not current:
+        return ""
+
+    diff = (target - current).days
+
+    if diff == 0:
+        return "今天"
+    elif diff == -1:
+        return "昨天"
+    elif diff == 1:
+        return "明天"
+    elif diff > 0:
+        return f"{diff} 天后"
+    else:
+        return f"{-diff} 天前"
+
+
+def parse_relative_offset(offset_str: str, current_str: str) -> Optional[str]:
+    """
+    Parse relative offsets like '-1d', '+2m' based on current_str.
+    Supports: [+/-]N[d|m|y]
+    """
+    current = parse_world_date(current_str)
+    if not current:
+        return None
+
+    match = re.match(r"^([+-]?\d+)([dmy])$", offset_str.lower())
+    if not match:
+        return None
+
+    val = int(match.group(1))
+    unit = match.group(2)
+
+    try:
+        if unit == "d":
+            from datetime import timedelta
+            new_date = current + timedelta(days=val)
+        elif unit == "m":
+            # Rough month calculation
+            new_month = current.month + val
+            new_year = current.year + (new_month - 1) // 12
+            new_month = (new_month - 1) % 12 + 1
+            new_date = current.replace(year=new_year, month=new_month)
+        elif unit == "y":
+            new_date = current.replace(year=current.year + val)
+        else:
+            return None
+        
+        return new_date.strftime("%Y-%m-%d")
+    except (ValueError, OverflowError):
+        return None
+

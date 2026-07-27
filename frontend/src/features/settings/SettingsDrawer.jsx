@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import {
-  Database, Server, Layers, Settings, X, RefreshCw, Globe
+  Database, Server, Layers, Settings, X, RefreshCw, Globe, Clock
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import i18n, { detectLocale } from '../../i18n';
@@ -12,6 +12,7 @@ import PresetsSection from './PresetsSection';
 import BootUrisSection from './BootUrisSection';
 import ServerSection from './ServerSection';
 import AdvancedSection from './AdvancedSection';
+import WorldClockSection from './WorldClockSection';
 import LocaleSection from './LocaleSection';
 
 export default function SettingsDrawer() {
@@ -57,9 +58,6 @@ export default function SettingsDrawer() {
   const handleSave = async (updates) => {
     const result = await updateSettings(updates);
     if (Object.prototype.hasOwnProperty.call(updates, 'locale')) {
-      // Locale change: no DB/server settings to refresh; skip loadAll()
-      // to avoid destroying LocaleSection's local dropdown state.
-      // Manually update the locale in settings so other tabs stay in sync.
       if (updates.locale === null) {
         await detectLocale();
       } else {
@@ -149,6 +147,10 @@ export default function SettingsDrawer() {
                       lockedFields={lockedFields}
                       onSave={handleSave}
                     />
+                  </Section>
+
+                  <Section icon={Clock} title="世界观时间" defaultOpen={true}>
+                    <WorldClockSection settings={settings} onSave={handleSave} />
                   </Section>
 
                   <Section icon={Globe} title={t('app.settings.section_locale')}>

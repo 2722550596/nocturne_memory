@@ -17,6 +17,7 @@
       "section_server": "服务器配置",
       "section_locale": "语言 / 区域",
       "section_advanced": "开发者模式 / 高级",
+      "section_world_clock": "世界观时间",
       "section_database": "数据库连接",
       "section_boot_uris": "启动 URI",
       "section_presets": "启动预设",
@@ -57,6 +58,17 @@
       "save": "保存",
       "save_failed": "保存失败",
       "invalid_port": "无效的端口号"
+    },
+    "world_clock": {
+      "current_time_label": "当前世界时间",
+      "current_time_hint": "作为计算“N天前”的参考基准，也是自动计时的默认时间。",
+      "auto_timestamp_label": "自动计时",
+      "auto_timestamp_desc": "新记忆在未指定时间时，自动关联当前世界时间。",
+      "show_relative_label": "显示相对时间",
+      "show_relative_desc": "在预览记忆时显示类似“3天前”的相对日期提示。",
+      "save": "保存更改",
+      "saving": "保存中...",
+      "save_failed": "保存失败"
     },
     "database": {
       "type_label": "类型",
@@ -223,7 +235,8 @@
       "priority_hint": "（数字越小优先级越高）",
       "disclosure": "触发条件",
       "disclosure_hint": "（何时回想）",
-      "disclosure_label": "触发条件：",
+      "disclosure_label": "触发条件",
+      "world_timestamp_label": "世界观时间",
       "disclosure_placeholder": "例如：当我需要记住..."
     },
     "create": {
@@ -236,9 +249,10 @@
       "title_hint": "仅限字母数字、连字符、下划线",
       "title_placeholder": "例如：my_memory",
       "priority_label": "优先级",
-      "priority_hint": "0 = 最高，5+ = 最低",
+      "priority_hint": "0 = 最高， 5+ = 最低",
       "disclosure_label": "触发条件",
-      "disclosure_placeholder": "何时回想此记忆...",
+      "world_timestamp_label": "世界观时间",
+      "disclosure_placeholder": "何时回想此 memory...",
       "content_label": "内容",
       "content_placeholder": "记忆内容...",
       "cancel": "取消",
@@ -298,164 +312,36 @@
     "toast": {
       "rejection_failed": "拒绝失败：{{error}}",
       "integration_failed": "合并失败：{{error}}",
-      "mass_integration_failed": "批量合并失败：{{error}}"
-    },
-    "confirm": {
-      "reject_title": "拒绝变更",
-      "reject_message": "拒绝节点组 {{uri}} 的变更？这将还原记忆状态。",
-      "reject_label": "拒绝",
-      "integrate_all_title": "全部合并",
-      "integrate_all_message": "合并所有待处理的记忆？",
-      "integrate_all_label": "全部合并"
-    },
-    "sidebar": {
-      "title": "全局审查",
-      "subtitle": "所有命名空间"
-    },
-    "action": {
-      "integrate_all": "全部合并",
-      "reject_group": "拒绝组",
-      "integrate_group": "合并组",
-      "retry": "重试连接"
-    },
-    "metadata": {
-      "title": "边元数据",
-      "initial": "（初始）",
-      "removed": "（已移除）",
-      "preserved": "（已保留）",
-      "shifts": "变更"
-    },
-    "namespace": {
-      "default": "默认"
-    },
-    "badge": {
-      "modified": "已修改",
-      "rows_affected": "{{count}} 行受影响"
-    },
-    "diff_status": {
-      "deletion_detected": "检测到删除",
-      "creation_detected": "检测到创建",
-      "modification_detected": "检测到修改",
-      "no_deviation": "无内容差异"
-    },
-    "path_modifications": {
-      "title": "路径修改"
-    },
-    "path": {
-      "removed": "已移除",
-      "added": "已添加",
-      "accessible_at": "节点仍可通过以下路径访问："
-    },
-    "glossary": {
-      "title": "豆辞典关键词"
-    },
-    "status": {
-      "synchronizing": "同步中...",
-      "connection_lost": "连接丢失"
-    },
-    "empty": {
-      "awaiting_input": "等待输入",
-      "select_memory": "选择一个记忆片段来检查"
-    }
-  },
-  "maintenance": {
-    "error": {
-      "load_orphans_failed": "加载孤儿记忆失败：{{error}}",
-      "load_logs_failed": "加载日志统计失败：{{error}}"
-    },
-    "toast": {
-      "logs_cleared": "已清除 {{count}} 条日志记录。",
-      "clear_logs_failed": "清除日志失败：{{error}}",
-      "partial_delete_failed": "{{failed}} / {{total}} 条删除失败。失败的 ID：{{ids}}"
-    },
-    "confirm": {
-      "delete_title": "删除记忆",
-      "delete_message": "永久删除 {{count}} 条记忆？此操作不可撤销。",
-      "delete_label": "删除"
-    },
-    "prompt": {
-      "clear_logs_title": "清除访问日志",
-      "clear_logs_message": "保留多少天的日志？更早的条目将被移除。",
-      "clear_logs_label": "清除"
-    },
-    "badge": {
-      "deprecated": "已弃用",
-      "orphaned": "孤儿",
-      "unknown_date": "未知",
-      "node_prefix": "节点：",
-      "mem_prefix": "记忆 #{{id}}"
-    },
-    "detail": {
-      "target_no_paths": "目标 #{{id}} 也无路径",
-      "loading": "正在加载完整内容...",
-      "error_prefix": "错误：{{error}}",
-      "old_version": "旧版本（此记忆）",
-      "full_content": "完整内容",
-      "diff_header": "差异：#{{fromId}} → #{{toId}}",
-      "restore_btn": "恢复此记忆",
-      "restore_title": "恢复记忆配置",
-      "restore_domain_label": "域名",
-      "restore_path_label": "目标路径",
-      "restore_parent_placeholder": "选择父路径",
-      "restore_leaf_placeholder": "新节点名称",
-      "restore_disclosure_placeholder": "输入触发条件（Disclosure）",
-      "restore_priority_label": "优先级",
-      "restore_namespace_label": "命名空间",
-      "restore_namespace_default": "（默认）",
-      "restore_confirm_btn": "确认恢复",
-      "restore_cancel_btn": "取消",
-      "restore_success_toast": "记忆恢复成功，新路径：{{uri}}",
-      "restore_failed_toast": "恢复记忆失败：{{error}}"
-    },
-    "select": {
-      "deselect_all": "取消全选",
-      "select_all": "全选"
-    },
-    "header": {
-      "title": "大脑清理",
-      "subtitle": "查找并清理孤儿记忆——更新产生的弃用版本，以及因路径删除而无法访问的记忆。"
-    },
-    "stats": {
-      "deprecated_label": "已弃用",
-      "orphaned_label": "孤儿",
-      "access_logs_label": "访问日志",
-      "clearing": "清除中...",
-      "clear_button": "清除",
-      "oldest": "最早：{{date}}",
-      "no_records": "无记录"
+      "rollback_failed": "回滚失败：{{error}}",
+      "clear_failed": "清理失败：{{error}}",
+      "integration_success": "成功合并 {{count}} 个节点",
+      "rollback_success": "成功回滚 {{count}} 个节点",
+      "clear_success": "清理完成"
     },
     "list": {
-      "header": "孤儿记忆",
-      "delete_selected": "删除 {{count}} 个已选中",
-      "refresh": "刷新",
-      "scanning": "正在扫描孤儿记忆...",
-      "error_title": "错误",
-      "empty_title": "系统干净",
-      "empty_desc": "未检测到孤儿记忆"
-    },
-    "section": {
-      "deprecated_versions": "已弃用版本",
-      "orphaned_memories": "孤儿记忆"
+      "title": "记忆审查",
+      "subtitle": "暂存区中有 {{count}} 组待处理的神经改动。",
+      "empty_state": "暂存区空空如也。所有神经改动都已同步。",
+      "approve_all": "全部应用",
+      "clear_all": "全部清空",
+      "clear_confirm": "确定要清空所有未审查的改动吗？此操作不可撤销。"
     },
     "group": {
-      "all": "所有记忆",
-      "deprecated_groups": "已弃用分组",
-      "orphaned_section": "孤儿记忆",
-      "orphaned_group": "孤儿记忆（无路径）",
-      "no_path": "目标 #{{id}}（无路径）"
+      "approve": "应用",
+      "rollback": "回滚",
+      "last_updated": "最后修改：",
+      "node_id": "节点 UUID：",
+      "uris": "访问路径：",
+      "no_path": "（无路径）",
+      "changes": "改动详情",
+      "confirm_rollback": "确定要回滚此节点的改动吗？"
+    },
+    "diff": {
+      "content": "内容改动",
+      "priority": "优先级改动",
+      "disclosure": "触发条件改动",
+      "no_changes": "此项未发生变动",
+      "loading": "正在计算差异..."
     }
-  },
-  "snapshot": {
-    "empty_sequence": "空序列",
-    "action_created": "已创建",
-    "action_deleted": "已删除",
-    "action_modified": "已修改",
-    "rows": "{{count}} 行"
-  },
-  "diff": {
-    "no_changes": "内容未检测到变化。",
-    "removed": "已移除",
-    "added": "已添加"
-  },
-  "_comment": "Key naming: {section}.{component}.{key}. Example: 'app.nav.review' for Review & Audit nav link. English is canonical — zh.json holds Chinese translations only."
+  }
 }

@@ -157,7 +157,14 @@ class GraphService:
                 "domain": path_obj.domain,
                 "path": path_obj.path,
                 "alias_count": alias_count,
+                "world_timestamp": memory.world_timestamp,
             }
+
+    async def search_memories(
+        self, query: str, domain: Optional[str] = None, limit: int = 10, namespace: str = ""
+    ) -> List[Dict[str, Any]]:
+        """Wrapper around SearchIndexer.search."""
+        return await self._search.search(query, limit=limit, domain=domain, namespace=namespace)
 
     async def get_paths_for_node(
         self,
@@ -731,6 +738,7 @@ class GraphService:
         content: str,
         *,
         deprecated: bool = False,
+        world_timestamp: Optional[str] = None,
     ) -> Memory:
         """Insert a new memory row and flush to obtain its ID."""
         # Canonicalize content to NFC at the write boundary so all stored
@@ -744,6 +752,7 @@ class GraphService:
             content=content,
             node_uuid=node_uuid,
             deprecated=deprecated,
+            world_timestamp=world_timestamp,
         )
         session.add(memory)
         await session.flush()
@@ -1296,6 +1305,7 @@ class GraphService:
         disclosure: Optional[str] = None,
         domain: str = "core",
         namespace: str = "",
+        world_timestamp: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Create a new memory under a parent path.
@@ -1334,7 +1344,7 @@ class GraphService:
 
             new_uuid = str(uuid_lib.uuid4())
             node = await self._ensure_node(session, new_uuid)
-            memory = await self._insert_memory(session, new_uuid, content)
+            memory = await self._insert_memory(session, new_uuid, content, world_timestamp=world_timestamp)
 
             edge_name = title if title else final_path.rsplit("/", 1)[-1]
             created = await self._create_edge_with_paths(
@@ -1374,6 +1384,7 @@ class GraphService:
         disclosure: Optional[str] = None,
         domain: str = "core",
         namespace: str = "",
+        world_timestamp: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Update a memory.
@@ -1381,7 +1392,7 @@ class GraphService:
         Content change -> new Memory row with the same node_uuid.
         Metadata change -> update the Edge directly.
         """
-        if content is None and priority is None and disclosure is None:
+        if content is None and priority is None and disclosure is None and world_timestamp is None:
             raise ValueError(
                 f"No update fields provided for '{domain}://{path}'. "
                 "At least one of content, priority, or disclosure must be set."
@@ -1438,18 +1449,32 @@ class GraphService:
                 rows_before["memories"] = [serialize_memory_ref(old_memory)]
 
                 new_memory = await self._insert_memory(
-                    session, node_uuid, content, deprecated=True
+                    session, node_uuid, content, 
+                    deprecated=True,
+                    world_timestamp=world_timestamp
+                )
+
+                vals = {"deprecated": False, "migrated_to": None}
+                if world_timestamp is not None:
+                    vals["world_timestamp"] = world_timestamp
+
+                await session.execute(
+                    update(Memory)
+                    .where(Memory.id == new_memory_id)
+                    .values(**vals)
+                )
+            elif world_timestamp is not None:
+                # If only world_timestamp changed (no content change)
+                await session.execute(
+                    update(Memory)
+                    .where(Memory.id == old_id)
+                    .values(world_timestamp=world_timestamp)
                 )
                 new_memory_id = new_memory.id
                 await self._deprecate_node_memories(
                     session,
                     node_uuid,
                     successor_id=new_memory_id,
-                )
-                await session.execute(
-                    update(Memory)
-                    .where(Memory.id == new_memory_id)
-                    .values(deprecated=False, migrated_to=None)
                 )
 
                 await session.flush()
@@ -1915,6 +1940,7 @@ class GraphService:
                         "created_at": memory.created_at.isoformat()
                         if memory.created_at
                         else None,
+                        "world_timestamp": memory.world_timestamp,
                     }
                 )
 

@@ -107,6 +107,7 @@ class Memory(Base):
     deprecated = Column(Boolean, default=False)
     migrated_to = Column(Integer, nullable=True)
     created_at = Column(DateTime, default=datetime.now)
+    world_timestamp = Column(Text, nullable=True)
 
     node = relationship("Node", back_populates="memories")
 
@@ -221,6 +222,7 @@ class SearchDocument(Base):
     # Stores glossary keywords plus auxiliary CJK search terms.
     search_terms = Column(Text, nullable=False, default="")
     priority = Column(Integer, nullable=False, default=0)
+    world_timestamp = Column(Text, nullable=True)
     updated_at = Column(DateTime, default=datetime.now)
 
 

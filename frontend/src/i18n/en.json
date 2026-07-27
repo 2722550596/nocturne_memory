@@ -19,6 +19,7 @@
       "section_server": "Server Configuration",
       "section_locale": "Language / Locale",
       "section_advanced": "Developer Mode / Advanced",
+      "section_world_clock": "World Clock",
       "section_database": "Database Connection",
       "section_boot_uris": "Boot URIs",
       "section_presets": "Boot Presets",
@@ -61,6 +62,17 @@
       "save": "Save",
       "save_failed": "Save failed",
       "invalid_port": "Invalid port number"
+    },
+    "world_clock": {
+      "current_time_label": "Current World Time",
+      "current_time_hint": "Used as the reference for calculating 'N days ago' and the default time for auto-timestamping.",
+      "auto_timestamp_label": "Auto-timestamp",
+      "auto_timestamp_desc": "Automatically associate new memories with the current world time if not specified.",
+      "show_relative_label": "Show Relative Time",
+      "show_relative_desc": "Display relative date hints like '3 days ago' in memory previews.",
+      "save": "Save Changes",
+      "saving": "Saving...",
+      "save_failed": "Save failed"
     },
     "database": {
       "type_label": "Type",
@@ -228,7 +240,8 @@
       "priority_hint": "(Lower values = higher priority)",
       "disclosure": "Disclosure",
       "disclosure_hint": "(When to recall)",
-      "disclosure_label": "Disclosure:",
+      "disclosure_label": "Disclosure",
+      "world_timestamp_label": "World Time",
       "disclosure_placeholder": "e.g., When I need to remember..."
     },
     "create": {
@@ -243,6 +256,7 @@
       "priority_label": "Priority",
       "priority_hint": "0 = highest, 5+ = lowest",
       "disclosure_label": "Disclosure",
+      "world_timestamp_label": "World Time",
       "disclosure_placeholder": "When to recall this memory...",
       "content_label": "Content",
       "content_placeholder": "Memory content...",
@@ -304,166 +318,36 @@
     "toast": {
       "rejection_failed": "Rejection failed: {{error}}",
       "integration_failed": "Integration failed: {{error}}",
-      "mass_integration_failed": "Mass integration failed: {{error}}"
-    },
-    "confirm": {
-      "reject_title": "Reject Changes",
-      "reject_message": "Reject changes for node group {{uri}}? This will restore the memory state.",
-      "reject_label": "Reject",
-      "integrate_all_title": "Integrate All",
-      "integrate_all_message": "Integrate all pending memories?",
-      "integrate_all_label": "Integrate All"
-    },
-    "sidebar": {
-      "title": "Global Review",
-      "subtitle": "All Namespaces"
-    },
-    "action": {
-      "integrate_all": "Integrate All",
-      "reject_group": "Reject Group",
-      "integrate_group": "Integrate Group",
-      "retry": "Retry Connection"
-    },
-    "metadata": {
-      "title": "Edge Metadata",
-      "initial": "(Initial)",
-      "removed": "(Removed)",
-      "preserved": "(Preserved)",
-      "shifts": "Shifts"
-    },
-    "namespace": {
-      "default": "Default"
-    },
-    "badge": {
-      "modified": "Modified",
-      "rows_affected": "{{count}} rows affected"
-    },
-    "diff_status": {
-      "deletion_detected": "Deletion Detected",
-      "creation_detected": "Creation Detected",
-      "modification_detected": "Modification Detected",
-      "no_deviation": "No Content Deviation"
-    },
-    "path_modifications": {
-      "title": "Path Modifications"
-    },
-    "path": {
-      "removed": "Removed",
-      "added": "Added",
-      "accessible_at": "Node still accessible at:"
-    },
-    "glossary": {
-      "title": "Glossary Keywords"
-    },
-    "status": {
-      "synchronizing": "Synchronizing...",
-      "connection_lost": "Connection Lost"
-    },
-    "empty": {
-      "awaiting_input": "Awaiting Input",
-      "select_memory": "Select a memory fragment to inspect"
-    }
-  },
-
-  "maintenance": {
-    "error": {
-      "load_orphans_failed": "Failed to load orphan memories: {{error}}",
-      "load_logs_failed": "Failed to load log statistics: {{error}}"
-    },
-    "toast": {
-      "logs_cleared": "Cleared {{count}} log records.",
-      "clear_logs_failed": "Failed to clear logs: {{error}}",
-      "partial_delete_failed": "{{failed}} / {{total}} deletions failed. Failed IDs: {{ids}}"
-    },
-    "confirm": {
-      "delete_title": "Delete Memory",
-      "delete_message": "Permanently delete {{count}} memories? This cannot be undone.",
-      "delete_label": "Delete"
-    },
-    "prompt": {
-      "clear_logs_title": "Clear Access Logs",
-      "clear_logs_message": "How many days of logs to keep? Older entries will be removed.",
-      "clear_logs_label": "Clear"
-    },
-    "badge": {
-      "deprecated": "Deprecated",
-      "orphaned": "Orphaned",
-      "unknown_date": "Unknown",
-      "node_prefix": "Node:",
-      "mem_prefix": "Mem: #{{id}}"
-    },
-    "detail": {
-      "target_no_paths": "Target #{{id}} also has no paths",
-      "loading": "Loading full content...",
-      "error_prefix": "Error: {{error}}",
-      "old_version": "Old Version (this memory)",
-      "full_content": "Full Content",
-      "diff_header": "Diff: #{{fromId}} → #{{toId}}",
-      "restore_btn": "Restore Memory",
-      "restore_title": "Restore Memory Configuration",
-      "restore_domain_label": "Domain",
-      "restore_path_label": "Target Path",
-      "restore_parent_placeholder": "Select parent path",
-      "restore_leaf_placeholder": "New segment name",
-      "restore_disclosure_placeholder": "Enter trigger condition (Disclosure)",
-      "restore_priority_label": "Priority",
-      "restore_namespace_label": "Namespace",
-      "restore_namespace_default": "(default)",
-      "restore_confirm_btn": "Confirm Restore",
-      "restore_cancel_btn": "Cancel",
-      "restore_success_toast": "Memory restored successfully at {{uri}}",
-      "restore_failed_toast": "Failed to restore memory: {{error}}"
-    },
-    "select": {
-      "deselect_all": "Deselect All",
-      "select_all": "Select All"
-    },
-    "header": {
-      "title": "Brain Cleanup",
-      "subtitle": "Find and clean up orphan memories — deprecated versions from updates and inaccessible memories due to deleted paths."
-    },
-    "stats": {
-      "deprecated_label": "Deprecated",
-      "orphaned_label": "Orphaned",
-      "access_logs_label": "Access Logs",
-      "clearing": "Clearing...",
-      "clear_button": "Clear",
-      "oldest": "Oldest: {{date}}",
-      "no_records": "No Records"
+      "rollback_failed": "Rollback failed: {{error}}",
+      "clear_failed": "Cleanup failed: {{error}}",
+      "integration_success": "Successfully integrated {{count}} nodes",
+      "rollback_success": "Successfully rolled back {{count}} nodes",
+      "clear_success": "Cleanup complete"
     },
     "list": {
-      "header": "Orphan Memories",
-      "delete_selected": "Delete {{count}} Selected",
-      "refresh": "Refresh",
-      "scanning": "Scanning for orphan memories...",
-      "error_title": "Error",
-      "empty_title": "System Clean",
-      "empty_desc": "No orphan memories detected"
-    },
-    "section": {
-      "deprecated_versions": "Deprecated Versions",
-      "orphaned_memories": "Orphan Memories"
+      "title": "Memory Review",
+      "subtitle": "There are {{count}} pending neural changes in the staging area.",
+      "empty_state": "The staging area is empty. All neural changes are synced.",
+      "approve_all": "Approve All",
+      "clear_all": "Clear All",
+      "clear_confirm": "Are you sure you want to clear all unreviewed changes? This action cannot be undone."
     },
     "group": {
-      "all": "All Memories",
-      "deprecated_groups": "Deprecated Groups",
-      "orphaned_section": "Orphan Memories",
-      "orphaned_group": "Orphan Memories (no paths)",
-      "no_path": "Target #{{id}} (no paths)"
+      "approve": "Approve",
+      "rollback": "Rollback",
+      "last_updated": "Last updated:",
+      "node_id": "Node UUID:",
+      "uris": "Access paths:",
+      "no_path": "(No path)",
+      "changes": "Change details",
+      "confirm_rollback": "Are you sure you want to rollback changes for this node?"
+    },
+    "diff": {
+      "content": "Content changes",
+      "priority": "Priority changes",
+      "disclosure": "Disclosure changes",
+      "no_changes": "No changes in this item",
+      "loading": "Calculating differences..."
     }
-  },
-
-  "snapshot": {
-    "empty_sequence": "Empty Sequence",
-    "action_created": "Created",
-    "action_deleted": "Deleted",
-    "action_modified": "Modified",
-    "rows": "{{count}} rows"
-  },
-
-  "diff": {
-    "no_changes": "No changes detected in content.",
-    "removed": "REMOVED",
-    "added": "ADDED"
   }
 }

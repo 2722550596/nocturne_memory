@@ -8,6 +8,7 @@ export default function CreateMemoryModal({ onClose, onCreated, parentPath, curr
   const [content, setContent] = useState('');
   const [priority, setPriority] = useState(0);
   const [disclosure, setDisclosure] = useState('');
+  const [worldTimestamp, setWorldTimestamp] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const { t } = useLocale();
@@ -32,6 +33,7 @@ export default function CreateMemoryModal({ onClose, onCreated, parentPath, curr
         disclosure: disclosure.trim(),
         title: title.trim() || undefined,
         domain: currentDomain,
+        world_timestamp: worldTimestamp.trim() || undefined,
       });
       onCreated(result.uri);
       // Reset form
@@ -39,6 +41,7 @@ export default function CreateMemoryModal({ onClose, onCreated, parentPath, curr
       setContent('');
       setPriority(0);
       setDisclosure('');
+      setWorldTimestamp('');
     } catch (err) {
       setError(err.response?.data?.detail || err.message);
     } finally {
@@ -52,6 +55,7 @@ export default function CreateMemoryModal({ onClose, onCreated, parentPath, curr
     setContent('');
     setPriority(0);
     setDisclosure('');
+    setWorldTimestamp('');
     setError('');
     onClose();
   };
@@ -120,6 +124,22 @@ export default function CreateMemoryModal({ onClose, onCreated, parentPath, curr
                 value={priority}
                 onChange={e => setPriority(parseInt(e.target.value) || 0)}
                 className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200 font-mono focus:outline-none focus:border-indigo-500/50 transition-colors"
+              />
+            </div>
+
+            {/* World Timestamp */}
+            <div className="space-y-1.5">
+              <label className="flex items-baseline justify-between">
+                <span className="text-xs font-medium text-slate-400">
+                  {t('memory.create.world_timestamp_label') || '世界观时间'} <span className="text-slate-600 font-normal">{t('memory.create.optional')}</span>
+                </span>
+              </label>
+              <input
+                type="text"
+                value={worldTimestamp}
+                onChange={e => setWorldTimestamp(e.target.value)}
+                placeholder="YYYY-MM-DD"
+                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-200 placeholder:text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500/50 transition-all"
               />
             </div>
           </div>
