@@ -178,6 +178,7 @@ export default function MemoryBrowser() {
     setSaving(true);
     try {
       const titleChanged = editTitle !== (data.node?.name || '');
+      const payload = {};
       if (editContent !== (data.node?.content || '')) payload.content = editContent;
       if (editPriority !== (data.node?.priority ?? 0)) payload.priority = editPriority;
       if (editDisclosure !== (data.node?.disclosure || '')) payload.disclosure = editDisclosure;
