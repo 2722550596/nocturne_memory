@@ -121,8 +121,8 @@ export default function MemoryBrowser() {
             return;
           }
         }
-
         const res = await api.get('/browse/node', { params: { domain, path } });
+        setData({ node: null, children: [], breadcrumbs: [], ...(res.data || {}) });
         setEditContent(res.data.node?.content || '');
         setEditDisclosure(res.data.node?.disclosure || '');
         setEditPriority(res.data.node?.priority ?? 0);
