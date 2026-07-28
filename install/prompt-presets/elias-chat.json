@@ -116,7 +116,7 @@
       "id": "chat-history",
       "name": "聊天记录",
       "slot": "chat-history",
-      "options": {"stripAssistantThinking": false}
+      "options": {"stripAssistantThinking": true}
     },
     {
       "kind": "block",

@@ -363,20 +363,16 @@ def _resolve_parent_children(graph, uri: str, namespace: str) -> Tuple[str, str]
 async def browse_memory(uri: str) -> str:
     """查看一段记忆的内容。
 
-    这是你回想起某件事的主要方式。输入 URI 就能看到那里的内容，
-    包括子节点和相关的触发词关联。
+    这是你回想起某件事的主要方式。输入 URI 就能看到那里的内容，包括子节点和相关的触发词关联。
 
     Args:
-        uri: 记忆的 URI，例如 core://identity
+        uri: 记忆的 URI，例如 core://identity/habits
 
         特殊系统视图（不需要记忆也看得到）：
         - system://boot        : 醒来时最先看到的记忆
-        - system://wakeup      : boot 记忆 + 最近场景历史
-        - system://wakeup/N    : 同上，显示 N 条历史（如 system://wakeup/10）
         - system://index/<domain>: 查看某个域下的所有记忆索引（如 system://index/core）
         - system://recent/<N>  : 查看最近修改的 N 条记忆（如 system://recent/10）
         - system://glossary    : 所有触发词索引
-        - system://diagnostic/<domain>[/<days>] : 记忆健康检查
     """
     try:
         stripped = uri.strip()
@@ -442,7 +438,7 @@ async def search_memory(query: str, domain: Optional[str] = None, limit: int = 1
         query: 搜索关键词
         domain: 可选，限定在某个域名下搜索（如 "core"、"history"）
         limit: 最多返回多少条（默认 10）
-        sort_by_world: 是否按世界观时间排序（默认按现实时间）
+        sort_by_world: 是否按世界时间排序（默认按现实时间）
     """
     graph = get_graph_service()
 
@@ -488,9 +484,11 @@ async def remember_memory(uri: str, content: str, time: Optional[str] = None) ->
     Args:
         uri: 记忆的路径（URI），例如 core://identity
         content: 记忆的具体内容
-        time: 可选。指定该记忆发生的世界观时间（YYYY-MM-DD）。
-              也支持相对位移，如 "-1d"（昨天）, "+1y"（明年）。
-              如果未提供，且配置开启了自动计时，则使用当前世界时间。
+        time: 可选。事件发生的世界时间（YYYY-MM-DD）。
+              支持相对位移，如 "-1d"（昨天）, "+1y"（明年）。
+              【何时使用时间？】
+              - Events：需要时间线追踪的具体事件必须写明时间。例如某次相遇、交流（如 core://events/first_impression）。
+              - Static：背景故事、性格习惯、世界观规则、常识（如 core://identity, core://world, core://relationships）。这类信息是永久有效的，无需传入时间。
     """
     try:
         # Split URI into domain, parent_path, and title
@@ -529,7 +527,7 @@ async def remember_memory(uri: str, content: str, time: Optional[str] = None) ->
 
 @mcp.tool()
 async def set_world_time(time: str) -> str:
-    """设置当前世界观时间。
+    """设置当前世界时间。
 
     改变此设置后，后续创建的记忆会自动关联到新时间，且在查看记忆时会更新“N天前”的计算参考。
 
@@ -578,12 +576,12 @@ async def remember_child_memory(
                      - 5：普通的事
                      - 10：边角料
         when: 什么情况下会想起这件事。
-              写一个具体的触发条件——别人说什么、或者你想做什么的时候。
+              写一个具体的外部信号或对话情境——别人说什么、或者你想做什么的时候。
               错误的例子：「当我觉得/意识到/注意到……」（意识不到就晚了）
-              正确的例子：「当对方提到晚饭没吃」（外部信号，来得早）
+              正确的例子：「当对方提到晚饭、或者表现出饥饿时」（外部信号，来得早）
         title: 可选的标题。一两个词概括内容，方便你以后扫一眼就知道是什么。
                 只能用字母、数字、连字符和下划线。
-        time: 可选。指定该记忆发生的世界观时间（YYYY-MM-DD 或相对位移如 "-1d"）。
+        time: 可选。事件发生的世界时间（YYYY-MM-DD 或相对位移如 "-1d"）。
               如果没有提供，系统会优先尝试继承父节点的世界时间。
 
     Returns:
@@ -685,7 +683,7 @@ async def edit_memory(
         line_content: [行编辑] 这一行的新内容
         importance: 可选，修改重要性
         when: 可选，修改想起条件
-        time: 可选，修改该记忆发生的世界观时间（如 "2024-06-01" 或 "-1d"）
+        time: 可选，修改该记忆发生的世界时间（如 "2024-06-01" 或 "-1d"）
     Examples:
         edit_memory("core://identity/habits", old_text="每天喝咖啡", new_text="每天喝茶")
         edit_memory("core://events/encounter_0302", append="\\n今天（3月3日）又遇到了他……")
@@ -811,8 +809,7 @@ async def forget_memory(uri: str) -> str:
     """忘掉一段记忆。删除前会自动备份到 staging/ 目录。
 
     删除的是这个 URI 路径下的记录。如果这个记忆还有其他入口
-    （别名），只拆掉这一个入口，内容还在。如果是最后一个入口，
-    记忆本身也会被删除。
+    （别名），只拆掉这一个入口，内容还在。如果是最后一个入口，记忆本身也会被删除。
 
     如果记忆下面还有子节点，得先把子节点清理掉才能删。
 
@@ -1286,7 +1283,7 @@ async def archive_memory(
         history: 场景摘要。整理过的、这段场景里发生了什么。
         mode: "char"（角色视角）或 "gm"（GM视角），默认 "char"。
         raw: 原始记录。可选，完整的对话或事件记录。
-        time: 可选。存档对应的世界观时间（如 "2024-06-01" 或 "-1d"）。默认使用当前世界时间。
+        time: 可选。存档对应的世界时间（如 "2024-06-01" 或 "-1d"）。默认使用当前世界时间。
     """
     graph = get_graph_service()
 
@@ -1300,7 +1297,7 @@ async def archive_memory(
         if not title or not re.match(r"^[a-zA-Z0-9_-]+$", title):
             return "title 必须提供，且只能包含字母、数字、连字符和下划线（如 'first_encounter'）。"
 
-        # --- 世界观时间处理 ---
+        # --- 世界时间处理 ---
         config = get_config()
         clock = config.get("world_clock", {})
         current_world_time = clock.get("current_time")

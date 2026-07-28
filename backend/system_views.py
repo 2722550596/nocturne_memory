@@ -395,6 +395,9 @@ async def generate_wakeup_view(boot_uris: List[str], history_limit: int = 5) -> 
     if raw_blocks:
         sections.append("## 最近场景记录\n" + "\n".join(raw_blocks))
         
+    if sections:
+            sections = _deduplicate_boot_content(sections, boot_uris)
+        
     return "\n\n---\n\n".join(sections)
 
 
@@ -434,7 +437,7 @@ async def _format_memory_clean(uri: str, ns: str, graph, max_children: int = 3) 
                 lines.append(f"> (发生于: {mem_world_time})")
 
     if disclosure:
-        lines.append(f"> {disclosure}")
+        lines.append(f"> 什么时候想起：{disclosure}\n")
     lines.append(content)
     lines.append("")
     
@@ -573,6 +576,46 @@ async def _format_recent_core_index_clean(ns: str, graph, limit: int = 5) -> Lis
     
     return lines
 
+def _deduplicate_boot_content(blocks: List[str], boot_uris: List[str] = None) -> List[str]:
+    """
+    去重逻辑：如果某个节点已经作为完整的 boot memory (### URI) 被拉取，
+    则在其父节点的 children 列表 (- URI) 或近期动态中隐藏它的 snippet，避免重复显示。
+    """
+    full_uris = set(boot_uris) if boot_uris else set()
+
+    # 1. 收集所有作为完整块渲染的 URI
+    for block in blocks:
+        for line in block.split('\n'):
+            if line.startswith('### '):
+                uri_line = line[4:].strip()
+                # 提取 URI（按空格分割取第一部分）
+                parts = uri_line.split()
+                if parts:
+                    full_uris.add(parts[0])
+
+    # 2. 过滤掉作为子节点列表或索引出现的重复 URI
+    clean_blocks = []
+    for block in blocks:
+        filtered_lines = []
+        for line in block.split('\n'):
+            if not line.startswith('- '):
+                filtered_lines.append(line)
+                continue
+
+            # 使用正则匹配列表项中的 URI
+            match = re.match(r"^- (\S+)", line)
+            if match and match.group(1) in full_uris:
+                # 如果这个 URI 已经在全量集合里了，跳过该行的 snippet
+                continue
+            
+            filtered_lines.append(line)
+        
+        # 重新组合 block，如果过滤后全为空白则丢弃
+        clean_block = "\n".join(filtered_lines)
+        if clean_block.strip():
+            clean_blocks.append(clean_block)
+
+    return clean_blocks
 
 async def generate_memory_slot_view(slot_type: str, boot_uris: List[str] = None) -> str:
     """Generate individual sections for Pi preset slots."""
@@ -587,7 +630,7 @@ async def generate_memory_slot_view(slot_type: str, boot_uris: List[str] = None)
     if slot_type == "boot":
         blocks = []
         if curr_world_time:
-            blocks.append(f"> **当前世界时间: {curr_world_time}**")
+            blocks.append(f"> 当前世界时间: {curr_world_time}")
 
         if boot_uris:
             for uri in boot_uris:
@@ -598,6 +641,9 @@ async def generate_memory_slot_view(slot_type: str, boot_uris: List[str] = None)
         recent_core = await _format_recent_core_index_clean(ns, graph, limit=5)
         if recent_core:
             blocks.append("## 最近动态\n" + "\n".join(recent_core))
+        
+        # --- 增加去重逻辑 ---
+        blocks = _deduplicate_boot_content(blocks, boot_uris)
         
         return "\n\n---\n\n".join(blocks)
 
@@ -614,8 +660,6 @@ async def generate_memory_slot_view(slot_type: str, boot_uris: List[str] = None)
         return ""
         
     return f"Unknown slot type: {slot_type}"
-
-
 
 async def generate_diagnostic_view(domain: str, days_stale: int = 30, max_children: int = 10) -> str:
     """Generate a diagnostic report of the memory graph (system://diagnostic/<domain>)."""
