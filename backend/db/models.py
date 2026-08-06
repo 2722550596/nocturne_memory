@@ -274,6 +274,31 @@ class Preset(Base):
 
 
 # =============================================================================
+# Revision Tree
+# =============================================================================
+
+
+class Revision(Base):
+    """不可变快照节点。每次 AI 写操作生成一个，parent_id 构成版本树。
+
+    与 ChangesetStore 的 changeset.json 同构：changeset 字段存储完整的行级
+    before/after 状态。回滚/分支在树上长出新叶子而非破坏性翻转。
+    """
+    __tablename__ = "revisions"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    parent_id = Column(Integer, ForeignKey("revisions.id"), nullable=True)
+    namespace = Column(String(64), nullable=False, default="")
+    # 完整的行级 before/after 状态，与 ChangesetStore 的 changeset.json 同构:
+    # {row_key: {"table":..., "before":..., "after":...}}
+    changeset = Column(Text, nullable=False)  # JSON
+    author = Column(String(32), nullable=False, default="ai")  # "ai" | "admin" | "system"
+    message = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.now)
+
+    parent = relationship("Revision", remote_side=[id], backref="children")
+
+# =============================================================================
 # Change Collector
 # =============================================================================
 

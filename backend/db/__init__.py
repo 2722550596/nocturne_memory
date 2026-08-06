@@ -13,7 +13,7 @@ from .snapshot import ChangesetStore, get_changeset_store
 from .namespace import get_namespace, set_namespace
 from .models import (
     Base, ROOT_NODE_UUID, Node, Memory, Edge, Path,
-    GlossaryKeyword, SearchDocument, ChangeCollector, Preset,
+    GlossaryKeyword, SearchDocument, ChangeCollector, Preset, Revision,
 )
 
 if TYPE_CHECKING:
@@ -123,6 +123,5 @@ __all__ = [
     "hot_swap_database",
     "ChangesetStore", "get_changeset_store",
     "get_namespace", "set_namespace",
-    "Base", "ROOT_NODE_UUID", "Node", "Memory", "Edge", "Path",
-    "GlossaryKeyword", "SearchDocument", "ChangeCollector", "Preset",
+    "GlossaryKeyword", "SearchDocument", "ChangeCollector", "Preset", "Revision",
 ]

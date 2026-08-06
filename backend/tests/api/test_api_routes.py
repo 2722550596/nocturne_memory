@@ -9,7 +9,7 @@ async def _seed_review_change(graph_service, mcp_module):
         title="review_item",
         disclosure="When reviewing",
     )
-    await mcp_module.update_memory("core://review_item", append="\nPending review update")
+    await mcp_module.edit_memory("core://review_item", append="\nPending review update")
 
 
 async def test_health_endpoint_reports_connected_database(api_client):
@@ -76,14 +76,14 @@ async def test_review_group_diff_and_rollback(api_client, graph_service, mcp_mod
 async def test_review_existing_memory_consecutive_updates_are_modified_and_rollback(
     api_client, graph_service, mcp_module
 ):
-    created = await mcp_module.create_memory(
-        "core://",
-        "Original version",
-        2,
+    created = await mcp_module.remember_child_memory(
+        parent_uri="core://",
+        content="Original version",
+        importance=2,
+        when="When first reviewing",
         title="review_consecutive_update",
-        disclosure="When first reviewing",
     )
-    assert "Success" in created
+    assert "记住" in created
 
     initial_groups = await api_client.get("/review/groups")
     assert initial_groups.status_code == 200
@@ -95,21 +95,21 @@ async def test_review_existing_memory_consecutive_updates_are_modified_and_rollb
     assert approved.status_code == 200
     assert (await api_client.get("/review/groups")).json() == []
 
-    first = await mcp_module.update_memory(
+    first = await mcp_module.edit_memory(
         "core://review_consecutive_update",
-        old_string="Original version",
-        new_string="Middle version",
-        disclosure="When reviewing middle",
+        old_text="Original version",
+        new_text="Middle version",
+        when="When reviewing middle",
     )
-    assert "Success" in first
+    assert "改好" in first
 
-    second = await mcp_module.update_memory(
+    second = await mcp_module.edit_memory(
         "core://review_consecutive_update",
-        old_string="Middle version",
-        new_string="Final version",
-        disclosure="When reviewing final",
+        old_text="Middle version",
+        new_text="Final version",
+        when="When reviewing final",
     )
-    assert "Success" in second
+    assert "改好" in second
 
     groups = await api_client.get("/review/groups")
     assert groups.status_code == 200
@@ -151,12 +151,12 @@ async def test_review_rollback_fails_if_previous_memory_version_was_purged(
         disclosure="When old version exists",
     )
 
-    updated = await mcp_module.update_memory(
+    updated = await mcp_module.edit_memory(
         "core://review_missing_old_version",
-        old_string="Rollback source version",
-        new_string="Updated version",
+        old_text="Rollback source version",
+        new_text="Updated version",
     )
-    assert "Success" in updated
+    assert "改好" in updated
 
     await graph_service.permanently_delete_memory(created["id"])
 
@@ -216,8 +216,8 @@ async def test_review_rollback_restores_path_even_if_node_is_live_in_other_names
     from db.namespace import set_namespace
 
     set_namespace("ns_a")
-    deleted = await mcp_module.delete_memory("core://shared_review_item")
-    assert "Success" in deleted
+    deleted = await mcp_module.forget_memory("core://shared_review_item")
+    assert "忘掉" in deleted or "没忘掉" not in deleted
 
     groups = await api_client.get("/review/groups")
     group = next(
@@ -250,13 +250,13 @@ async def test_review_diff_includes_path_and_glossary_changes(api_client, graph_
         disclosure="When diffing linked memory",
     )
 
-    await mcp_module.add_alias(
-        "project://linked_alias",
+    await mcp_module.link_memory(
         "core://linked_item",
-        priority=3,
-        disclosure="When mirroring linked memory",
+        "project://linked_alias",
+        importance=3,
+        when="When mirroring linked memory",
     )
-    await mcp_module.manage_triggers("core://linked_item", add=["GraphService"])
+    await mcp_module.tag_memory("core://linked_item", add=["GraphService"])
 
     groups = await api_client.get("/review/groups")
     payload = groups.json()

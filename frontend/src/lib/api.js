@@ -53,6 +53,14 @@ export const approveGroup = (nodeUuid) =>
 export const clearAll = () =>
   api.delete('/review').then(res => res.data);
 
+// ============ Revision Tree API ============
+
+export const getRevisions = () =>
+  api.get('/review/revisions').then(res => res.data);
+
+export const checkoutRevision = (id) =>
+  api.post(`/review/revisions/${id}/checkout`, {}).then(res => res.data);
+
 // ============ Browse API ============
 
 export const getDomains = () =>

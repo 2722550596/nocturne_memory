@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { getGroups, getGroupDiff, rollbackGroup, approveGroup, clearAll } from '../../lib/api';
+import { getGroups, getGroupDiff, rollbackGroup, approveGroup, clearAll, getRevisions, checkoutRevision } from '../../lib/api';
 import SnapshotList from '../../components/SnapshotList';
 import DiffViewer from '../../components/DiffViewer';
 import { toast } from '../../components/Toast';
@@ -15,7 +15,8 @@ import {
   Trash2,
   Box,
   Link as LinkIcon,
-  BookOpen
+  BookOpen,
+  GitBranch,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { useLocale } from '../../i18n/useLocale';
@@ -28,10 +29,52 @@ function ReviewPage() {
   const [loading, setLoading] = useState(false);
   const [diffError, setDiffError] = useState(null);
   const [confirmState, setConfirmState] = useState(null);
+  const [viewMode, setViewMode] = useState('review');  // 'review' | 'history'
+  const [revisions, setRevisions] = useState([]);
+  const [revisionsLoading, setRevisionsLoading] = useState(false);
+  const [checkoutError, setCheckoutError] = useState(null);
 
   const diffRequestRef = useRef(0);
 
   useEffect(() => { loadChanges(); }, []);
+
+  const loadRevisions = async () => {
+    setRevisionsLoading(true);
+    setCheckoutError(null);
+    try {
+      const data = await getRevisions();
+      setRevisions(data?.revisions || []);
+    } catch {
+      setRevisions([]);
+    } finally {
+      setRevisionsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (viewMode === 'history') loadRevisions();
+  }, [viewMode]);
+
+  const handleCheckout = (revisionId) => {
+    setConfirmState({
+      title: t('review.confirm.checkout_title', { defaultValue: 'Checkout Revision' }),
+      message: t('review.confirm.checkout_message', { defaultValue: 'Rewind HEAD to this revision? This creates a new branch node; current state is preserved in the tree.' }),
+      variant: "default",
+      confirmLabel: t('review.confirm.checkout_label', { defaultValue: 'Checkout' }),
+      onConfirm: async () => {
+        setConfirmState(null);
+        try {
+          await checkoutRevision(revisionId);
+          await loadRevisions();
+        } catch (err) {
+          const detail = err.response?.data?.detail || err.message;
+          setCheckoutError(detail);
+          toast(t('review.toast.checkout_failed', { defaultValue: 'Checkout failed', error: detail }), "error");
+        }
+      },
+      onCancel: () => setConfirmState(null),
+    });
+  };
 
   const loadChanges = async () => {
     setLoading(true);
@@ -227,9 +270,89 @@ function ReviewPage() {
             </div>
           </div>
         </div>
+        <div className="flex border-b border-slate-800/30">
+          <button
+            onClick={() => setViewMode('review')}
+            className={clsx(
+              "flex-1 flex items-center justify-center gap-1.5 py-2.5 text-[11px] font-medium uppercase tracking-wider transition-all",
+              viewMode === 'review'
+                ? "text-indigo-300 border-b border-indigo-500/50 bg-indigo-500/5"
+                : "text-slate-600 hover:text-slate-400 border-b border-transparent"
+            )}
+          >
+            <ShieldCheck size={13} /> {t('review.tab.review', { defaultValue: 'Review' })}
+          </button>
+          <button
+            onClick={() => setViewMode('history')}
+            className={clsx(
+              "flex-1 flex items-center justify-center gap-1.5 py-2.5 text-[11px] font-medium uppercase tracking-wider transition-all",
+              viewMode === 'history'
+                ? "text-purple-300 border-b border-purple-500/50 bg-purple-500/5"
+                : "text-slate-600 hover:text-slate-400 border-b border-transparent"
+            )}
+          >
+            <GitBranch size={13} /> {t('review.tab.history', { defaultValue: 'History' })}
+          </button>
+        </div>
 
         <div className="flex-1 overflow-y-auto py-2">
-          {loading ? (
+          {viewMode === 'history' ? (
+            revisionsLoading ? (
+              <div className="p-8 flex justify-center">
+                <div className="w-6 h-6 border-2 border-purple-500/30 border-t-purple-500 rounded-full animate-spin"></div>
+              </div>
+            ) : revisions.length === 0 ? (
+              <div className="p-6 text-center text-xs text-slate-600">
+                {t('review.history.empty', { defaultValue: 'No revisions yet. Approve or rollback changes to build the tree.' })}
+              </div>
+            ) : (
+              <div className="px-2">
+                {revisions.map((rev) => (
+                  <div
+                    key={rev.id}
+                    className={clsx(
+                      "group flex items-start gap-2 px-3 py-2 rounded-md cursor-default transition-colors",
+                      rev.is_head ? "bg-purple-500/10 border border-purple-500/20" : "hover:bg-slate-800/30"
+                    )}
+                  >
+                    <div className={clsx(
+                      "mt-0.5 w-2 h-2 rounded-full flex-shrink-0",
+                      rev.author === 'admin' ? "bg-rose-400" : "bg-indigo-400"
+                    )} />
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-xs font-mono text-slate-300">#{rev.id}</span>
+                        <span className={clsx(
+                          "text-[9px] px-1 rounded uppercase tracking-wider",
+                          rev.author === 'admin' ? "bg-rose-500/10 text-rose-400" : "bg-indigo-500/10 text-indigo-400"
+                        )}>
+                          {rev.author}
+                        </span>
+                        {rev.is_head && (
+                          <span className="text-[9px] px-1 rounded bg-purple-500/20 text-purple-300 uppercase tracking-wider font-bold">HEAD</span>
+                        )}
+                      </div>
+                      <div className="text-[10px] text-slate-600 mt-0.5 truncate">
+                        {rev.created_at ? new Date(rev.created_at).toLocaleString() : '—'}
+                      </div>
+                      {rev.message && (
+                        <div className="text-[10px] text-slate-500 mt-0.5 truncate">{rev.message}</div>
+                      )}
+                    </div>
+                    {!rev.is_head && (
+                      <button
+                        onClick={() => handleCheckout(rev.id)}
+                        title={t('review.action.checkout', { defaultValue: 'Checkout to this revision' })}
+                        className="opacity-0 group-hover:opacity-100 transition-opacity text-slate-500 hover:text-purple-300 p-1"
+                      >
+                        <RotateCcw size={12} />
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )
+          ) : loading ? (
             <div className="p-8 flex justify-center">
               <div className="w-6 h-6 border-2 border-indigo-500/30 border-t-indigo-500 rounded-full animate-spin"></div>
             </div>
@@ -242,7 +365,7 @@ function ReviewPage() {
           )}
         </div>
 
-        {changes.length > 0 && (
+        {viewMode === 'review' && changes.length > 0 && (
           <div className="p-4 border-t border-slate-800/30 bg-slate-900/20 backdrop-blur-sm">
             <button
               onClick={handleClearAll}
@@ -259,7 +382,66 @@ function ReviewPage() {
       <div className="flex-1 flex flex-col min-w-0 bg-[#05050A] relative">
         <div className="absolute top-0 left-0 right-0 h-96 bg-gradient-to-b from-purple-900/5 to-transparent pointer-events-none" />
 
-        {selectedChange ? (
+        {viewMode === 'history' ? (
+          <div className="flex-1 overflow-y-auto px-8 py-8 relative z-10">
+            <div className="max-w-3xl mx-auto">
+              <div className="flex items-center gap-3 mb-6">
+                <GitBranch size={20} className="text-purple-400" />
+                <h2 className="text-lg font-medium text-slate-100">{t('review.history.title', { defaultValue: 'Revision History' })}</h2>
+              </div>
+              {checkoutError && (
+                <div className="mb-4 p-3 rounded-md bg-rose-950/20 border border-rose-800/40 text-rose-300 text-xs">
+                  {checkoutError}
+                </div>
+              )}
+              {revisions.length === 0 ? (
+                <p className="text-sm text-slate-600">{t('review.history.empty', { defaultValue: 'No revisions yet. Approve or rollback changes to build the tree.' })}</p>
+              ) : (
+                <div className="space-y-1">
+                  {revisions.map((rev) => (
+                    <div
+                      key={rev.id}
+                      className={clsx(
+                        "flex items-center gap-4 p-3 rounded-md border transition-colors",
+                        rev.is_head
+                          ? "bg-purple-500/5 border-purple-500/30"
+                          : "bg-slate-900/30 border-slate-800/40 hover:border-slate-700"
+                      )}
+                    >
+                      <div className={clsx(
+                        "w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 text-xs font-mono font-bold",
+                        rev.author === 'admin'
+                          ? "bg-rose-500/10 text-rose-400 border border-rose-500/20"
+                          : "bg-indigo-500/10 text-indigo-400 border border-indigo-500/20"
+                      )}>
+                        {rev.author === 'admin' ? 'A' : 'AI'}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm font-mono text-slate-200">#{rev.id}</span>
+                          {rev.parent_id && <span className="text-[10px] text-slate-600">← #{rev.parent_id}</span>}
+                          {rev.is_head && <span className="text-[10px] px-1.5 py-0.5 rounded bg-purple-500/20 text-purple-300 uppercase tracking-wider font-bold">HEAD</span>}
+                        </div>
+                        <div className="text-xs text-slate-500 mt-0.5">
+                          {rev.created_at ? new Date(rev.created_at).toLocaleString() : '-'}
+                          {rev.message ? ` · ${rev.message}` : ''}
+                        </div>
+                      </div>
+                      {!rev.is_head && (
+                        <button
+                          onClick={() => handleCheckout(rev.id)}
+                          className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800/50 hover:bg-purple-900/20 text-slate-400 hover:text-purple-300 border border-slate-700 hover:border-purple-700/50 rounded-md text-[11px] font-medium transition-all"
+                        >
+                          <RotateCcw size={12} /> {t('review.action.checkout', { defaultValue: 'Checkout' })}
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        ) : selectedChange ? (
           <>
             {/* Header */}
             <div className="h-20 border-b border-slate-800/30 flex items-center justify-between px-8 relative z-10 backdrop-blur-sm">

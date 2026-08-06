@@ -86,7 +86,7 @@ class ChangesetStore:
         if os.path.exists(p):
             with open(p, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            
+
             rows = data.get("rows", {})
             # Backward compatibility: migrate old paths and glossary_keywords without namespace
             # to include namespace="" and fix their keys
@@ -101,7 +101,7 @@ class ChangesetStore:
                     if row.get("after") and "namespace" not in row["after"]:
                         row["after"]["namespace"] = ""
                         changed = True
-                    
+
                     # For glossary_keywords we must re-key anyway because the TABLE_PKS tuple length changed,
                     # so old keys don't have the namespace component.
                     if changed or table == "glossary_keywords":
@@ -111,15 +111,132 @@ class ChangesetStore:
                         migrated_rows[old_key] = row
                 else:
                     migrated_rows[old_key] = row
-            
+
             data["rows"] = migrated_rows
+            # Revision-tree fields (backward compat: old files lack these).
+            # head_revision_id points at the active HEAD node in `revisions`;
+            # approved is the staging pool of approved-but-not-yet-committed rows.
+            data.setdefault("head_revision_id", None)
+            data.setdefault("approved", {})
             return data
-        return {"rows": {}}
+        return {"rows": {}, "head_revision_id": None, "approved": {}}
 
     def _save(self, data: Dict[str, Any]):
         p = self._changeset_path
         with open(p, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
+
+    def _drain(self, data: Dict[str, Any]):
+        """Called when `rows` becomes empty after a mutation.
+
+        Preserves revision-tree metadata (head_revision_id, approved pool)
+        by writing a minimal file; only deletes the file entirely when both
+        are empty too.
+        """
+        head = data.get("head_revision_id")
+        approved = data.get("approved") or {}
+        if head is not None or approved:
+            self._save({
+                "head_revision_id": head,
+                "rows": {},
+                "approved": approved,
+            })
+        else:
+            self._remove_changeset()
+
+    # ------------------------------------------------------------------
+    # Revision tree accessors
+    # ------------------------------------------------------------------
+
+    def get_head_revision_id(self) -> Optional[int]:
+        """Return the id of the active HEAD revision node, or None."""
+        with self._lock:
+            data = self._load()
+        return data.get("head_revision_id")
+
+    def set_head_revision_id(self, revision_id: Optional[int]):
+        """Update the HEAD pointer, preserving the pending rows pool."""
+        with self._lock:
+            data = self._load()
+            data["head_revision_id"] = revision_id
+            if data.get("rows") or revision_id is not None or data.get("approved"):
+                self._save(data)
+            else:
+                self._remove_changeset()
+
+    def pool_approved(self, keys: List[str]) -> int:
+        """Move rows from the pending `rows` pool into the `approved` staging pool.
+
+        Used by approve_group: approved rows are retained (not deleted) so the
+        full batch can be committed as a single revision once the pool drains.
+        Returns the number of rows moved.
+        """
+        if not keys:
+            return 0
+        with self._lock:
+            data = self._load()
+            approved = data.setdefault("approved", {})
+            moved = 0
+            for k in keys:
+                row = data["rows"].pop(k, None)
+                if row is not None:
+                    approved[k] = row
+                    moved += 1
+            if not self._changed_rows(data):
+                self._drain(data)
+            elif moved > 0:
+                self._save(data)
+        return moved
+
+    def get_approved_rows(self) -> Dict[str, dict]:
+        """Return a copy of the approved staging pool {row_key: row}."""
+        with self._lock:
+            data = self._load()
+        return dict(data.get("approved", {}))
+
+    def drain_approved(self) -> Dict[str, dict]:
+        """Atomically pop and return the approved staging pool, clearing it from disk."""
+        with self._lock:
+            data = self._load()
+            approved = data.pop("approved", {})
+            data["approved"] = {}
+            if data.get("rows") or data.get("head_revision_id") is not None:
+                self._save(data)
+            else:
+                self._remove_changeset()
+        return approved
+
+    def load_all_changed_rows(self) -> Dict[str, dict]:
+        """Return the union of pending + approved changed rows (for revision commit)."""
+        with self._lock:
+            data = self._load()
+        rows = dict(data.get("rows", {}))
+        rows.update(data.get("approved", {}))
+        # Filter to net-changed rows only
+        return {k: v for k, v in rows.items()
+                if not _rows_equal(v.get("table", ""), v.get("before"), v.get("after"))}
+
+    def reset_pool(self):
+        """Clear both pending rows and the approved pool, preserving HEAD."""
+        with self._lock:
+            data = self._load()
+            data["rows"] = {}
+            data["approved"] = {}
+            if data.get("head_revision_id") is not None:
+                self._save(data)
+            else:
+                self._remove_changeset()
+
+    def _restore_pool(self, rows: Dict[str, dict]):
+        """Restore a backed-up set of rows into the pending pool (post-failure).
+
+        Used by rollback_group to put the group back into the review queue when
+        the DB revert raised. Preserves HEAD and the approved pool.
+        """
+        with self._lock:
+            data = self._load()
+            data["rows"] = dict(rows)
+            self._save(data)
 
     # ------------------------------------------------------------------
     # Core: record with overwrite semantics
@@ -162,7 +279,7 @@ class ChangesetStore:
             if data.get("rows"):
                 self._save(data)
             else:
-                self._remove_changeset()
+                self._drain(data)
 
     def record_many(
         self,
@@ -205,7 +322,7 @@ class ChangesetStore:
             if data.get("rows"):
                 self._save(data)
             else:
-                self._remove_changeset()
+                self._drain(data)
 
     # ------------------------------------------------------------------
     # Query
@@ -244,7 +361,7 @@ class ChangesetStore:
                     
             remaining = self._changed_rows(data)
             if not remaining:
-                self._remove_changeset()
+                self._drain(data)
             elif removed > 0:
                 self._save(data)
                 
@@ -255,7 +372,7 @@ class ChangesetStore:
         with self._lock:
             data = self._load()
             count = len(self._changed_rows(data))
-            self._remove_changeset()
+            self._drain(data)
         return count
 
     # ------------------------------------------------------------------
@@ -378,3 +495,91 @@ def get_changeset_store() -> ChangesetStore:
     if _store is None:
         _store = ChangesetStore()
     return _store
+
+
+# ---------------------------------------------------------------------------
+# Revision tree persistence (async, requires DB session)
+# ---------------------------------------------------------------------------
+
+
+async def commit_revision(
+    session,
+    parent_id: Optional[int],
+    namespace: str,
+    changeset_rows: Dict[str, dict],
+    author: str = "ai",
+    message: Optional[str] = None,
+) -> int:
+    """Freeze the current changeset pool into an immutable revision node.
+
+    Returns the new revision.id. `changeset_rows` is the {row_key: row} dict
+    (same shape as ChangesetStore._load()["rows"]); stored verbatim as JSON.
+    """
+    from .models import Revision  # local import to avoid ORM boot-order issues
+    rev = Revision(
+        parent_id=parent_id,
+        namespace=namespace,
+        changeset=json.dumps(changeset_rows, ensure_ascii=False),
+        author=author,
+        message=message,
+    )
+    session.add(rev)
+    await session.flush()
+    return rev.id
+
+
+async def get_revision_tree(
+    session,
+    namespace: str = "",
+) -> List[dict]:
+    """Return all revisions (optionally namespace-filtered) as lightweight dicts.
+
+    Each entry: id, parent_id, author, message, created_at, is_head.
+    `is_head` is true for the node the current changeset.json points at.
+    """
+    from sqlalchemy import select
+    from .models import Revision
+    store = get_changeset_store()
+    head_id = store.get_head_revision_id()
+
+    stmt = select(Revision).order_by(Revision.id.asc())
+    if namespace:
+        stmt = stmt.where(Revision.namespace == namespace)
+    res = await session.execute(stmt)
+    nodes = []
+    for rev in res.scalars():
+        nodes.append({
+            "id": rev.id,
+            "parent_id": rev.parent_id,
+            "namespace": rev.namespace,
+            "author": rev.author,
+            "message": rev.message,
+            "created_at": rev.created_at.isoformat() if rev.created_at else None,
+            "is_head": rev.id == head_id,
+        })
+    return nodes
+
+
+async def get_revision(session, revision_id: int):
+    """Return a single Revision ORM row, or None."""
+    from sqlalchemy import select
+    from .models import Revision
+    res = await session.execute(select(Revision).where(Revision.id == revision_id))
+    return res.scalar_one_or_none()
+
+
+async def is_ancestor(session, ancestor_id: int, descendant_id: int) -> bool:
+    """True if ancestor_id is on the parent-chain of descendant_id (inclusive)."""
+    if ancestor_id == descendant_id:
+        return True
+    cur_id = descendant_id
+    seen = set()
+    while cur_id is not None and cur_id not in seen:
+        seen.add(cur_id)
+        cur = await get_revision(session, cur_id)
+        if cur is None:
+            return False
+        cur_id = cur.parent_id
+        if cur_id == ancestor_id:
+            return True
+    return False

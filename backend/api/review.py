@@ -17,7 +17,10 @@ from models import (
     GroupRollbackResponse,
 )
 from .utils import get_text_diff
-from db.snapshot import get_changeset_store, _make_row_key
+from db.snapshot import (
+    get_changeset_store, _make_row_key,
+    commit_revision, get_revision_tree, get_revision, is_ancestor,
+)
 from db import get_graph_service, get_search_indexer, get_db_manager
 
 router = APIRouter(prefix="/review", tags=["review"])
@@ -613,183 +616,248 @@ async def get_group_diff(node_uuid: str):
         has_changes=has_changes,
     )
 
+async def _revert_rows_to_before(session, graph, search, rows, fallback_node_uuid=None):
+    """Revert DB state for `rows` to each row's `before` snapshot.
+
+    Shared by rollback_group (per-node) and checkout (accumulated undo path).
+    Mirrors the universal rollback: cascade-delete created nodes, remove created
+    paths, restore deleted paths, revert edge metadata, revive old memories,
+    revert glossary keywords. Returns a list of human-readable messages.
+    """
+    from sqlalchemy import select, update, delete
+    from db.models import Edge, GlossaryKeyword, Node
+
+    messages = []
+
+    node_created = any(r["table"] == "nodes" and r["before"] is None for r in rows)
+    if node_created and fallback_node_uuid:
+        await graph.cascade_delete_node(session, fallback_node_uuid)
+        messages.append("Deleted created node and its dependencies.")
+    else:
+        # Revert Path Changes by sorting lengths
+        path_rows = [r for r in rows if r["table"] == "paths"]
+        path_creations = [r for r in path_rows if r["before"] is None and r["after"] is not None]
+        path_creations.sort(key=lambda r: len(r["after"]["path"].split("/")), reverse=True)  # remove children first
+        path_deletions = [r for r in path_rows if r["before"] is not None and r["after"] is None]
+        path_deletions.sort(key=lambda r: len(r["before"]["path"].split("/")))  # restore parents first
+
+        # 2a. Remove created paths
+        for r in path_creations:
+            try:
+                await graph.remove_path(r["after"]["path"], r["after"]["domain"], session=session, namespace=r["after"].get("namespace"))
+                messages.append(f"Removed path '{r['after']['path']}'.")
+            except ValueError as e:
+                if "not found" not in str(e):
+                    raise e
+
+        # 2b. Restore deleted paths
+        for r in path_deletions:
+            edge_id = r["before"].get("edge_id")
+            edge_before = None
+
+            # Try to find the original edge metadata from the changeset
+            for er in rows:
+                if er["table"] == "edges" and (er["before"] or {}).get("id") == edge_id:
+                    edge_before = er["before"]
+                    break
+
+            parent_uuid = edge_before.get("parent_uuid") if edge_before else None
+            child_uuid = edge_before.get("child_uuid") if edge_before else None
+            priority = edge_before.get("priority", 0) if edge_before else 0
+            disclosure = edge_before.get("disclosure") if edge_before else None
+
+            # If edge wasn't deleted/changed, pull missing metadata from live DB
+            if (parent_uuid is None or child_uuid is None) and edge_id:
+                edge_db = (await session.execute(select(Edge).where(Edge.id == edge_id))).scalar_one_or_none()
+                if edge_db:
+                    parent_uuid = edge_db.parent_uuid
+                    child_uuid = edge_db.child_uuid
+                    priority = edge_db.priority
+                    disclosure = edge_db.disclosure
+
+            target_node_uuid = child_uuid or fallback_node_uuid or (r["before"].get("node_uuid") if r["before"] else None)
+
+            await graph.restore_path(
+                path=r["before"]["path"],
+                domain=r["before"]["domain"],
+                node_uuid=target_node_uuid,
+                parent_uuid=parent_uuid,
+                priority=priority,
+                disclosure=disclosure,
+                session=session,
+                namespace=r["before"].get("namespace")
+            )
+            messages.append(f"Restored path '{r['before']['path']}'.")
+
+        # 3. Revert Edge Metadata Changes (Priority / Disclosure)
+        for r in rows:
+            if r["table"] == "edges" and r["before"] and r["after"]:
+                old_p = r["before"].get("priority")
+                old_d = r["before"].get("disclosure")
+                # If properties changed, issue an explicit DB UPDATE to revert them
+                if old_p != r["after"].get("priority") or old_d != r["after"].get("disclosure"):
+                    await session.execute(
+                        update(Edge).where(Edge.id == r["before"]["id"]).values(
+                            priority=old_p, disclosure=old_d
+                        )
+                    )
+                    messages.append("Restored edge metadata.")
+
+        # 4. Revert Memory Content (Revive old deprecated memory version)
+        for r in rows:
+            # Find the old memory row that was active ('deprecated' == False) before the changes
+            if r["table"] == "memories" and r["before"] and not r["before"].get("deprecated"):
+                old_active_mem_id = r["before"].get("id")
+                try:
+                    # rollback_to_memory automatically deprecates the current memory
+                    # and un-deprecates the old one
+                    # When admin does a rollback, it rebuilds FTS docs for ALL namespaces
+                    await graph.rollback_to_memory(old_active_mem_id, session=session)
+                    messages.append(f"Restored previous memory content ({old_active_mem_id}).")
+                except ValueError as exc:
+                    raise RuntimeError(
+                        t("api.review.cannot_restore_memory").format(memory_id=old_active_mem_id, error=exc)
+                    ) from exc
+
+        # 5. Revert Glossary Keywords
+        for r in rows:
+            if r["table"] == "glossary_keywords":
+                if r["before"] is None and r["after"] is not None:
+                    # Revert creation -> delete
+                    await session.execute(
+                        delete(GlossaryKeyword).where(
+                            GlossaryKeyword.keyword == r["after"]["keyword"],
+                            GlossaryKeyword.node_uuid == r["after"]["node_uuid"],
+                            GlossaryKeyword.namespace == r["after"].get("namespace", "")
+                        )
+                    )
+                    messages.append(f"Reverted glossary keyword addition ('{r['after']['keyword']}').")
+                elif r["before"] is not None and r["after"] is None:
+                    # Revert deletion -> create
+                    b = r["before"]
+
+                    # Check if target node still exists to avoid foreign key error
+                    node_exists = (await session.execute(
+                        select(Node).where(Node.uuid == b["node_uuid"])
+                    )).scalar_one_or_none()
+
+                    if not node_exists:
+                        messages.append(f"Target node for glossary keyword ('{b['keyword']}') no longer exists, skipped restore.")
+                        continue
+
+                    # Check if the keyword already exists (e.g. manually re-added) to avoid unique constraint conflict
+                    existing = (await session.execute(
+                        select(GlossaryKeyword).where(
+                            GlossaryKeyword.keyword == b["keyword"],
+                            GlossaryKeyword.node_uuid == b["node_uuid"],
+                            GlossaryKeyword.namespace == b.get("namespace", "")
+                        )
+                    )).scalar_one_or_none()
+
+                    if not existing:
+                        entry = GlossaryKeyword(
+                            keyword=b["keyword"],
+                            node_uuid=b["node_uuid"],
+                            namespace=b.get("namespace", "")
+                        )
+                        session.add(entry)
+                        messages.append(f"Restored glossary keyword ('{b['keyword']}').")
+                    else:
+                        messages.append(f"Glossary keyword ('{b['keyword']}') already exists, skipped restore.")
+
+    await search.rebuild_all_search_documents(session=session)
+    if not messages:
+        messages.append("No rollback action required.")
+    return messages
+
+
+async def _commit_pending_as_revision(session, store, author="ai", message=None):
+    """Commit the full pending + approved pool as one revision node, update HEAD.
+
+    If the pool is empty, no revision is created and HEAD is unchanged.
+    Returns the new revision id, or None if nothing was committed.
+    """
+    rows = store.load_all_changed_rows()
+    if not rows:
+        return None
+    parent_id = store.get_head_revision_id()
+    new_id = await commit_revision(session, parent_id, "", rows, author=author, message=message)
+    store.set_head_revision_id(new_id)
+    store.drain_approved()
+    store.reset_pool()
+    return new_id
+
 
 @router.post("/groups/{node_uuid}/rollback", response_model=GroupRollbackResponse)
 async def rollback_group(node_uuid: str):
     """
     Execute universal rollback for all changes under a specific node_uuid.
-    
-    This is a purely data-driven rollback:
-    1. If the node itself was created, cascade delete the whole node.
-    2. Otherwise, revert paths (delete new ones, restore deleted ones).
-    3. Revert edge metadata changes via simple UPDATE.
-    4. Revert memory content by reviving the old deprecated memory version.
-    
-    Finally, purges all related rows from the snapshot changeset.
+
+    Revision-tree aware:
+      1. Snapshot the current pending pool as an `author="ai"` revision (pre-rollback).
+      2. Revert DB rows to their `before` state (universal rollback).
+      3. Commit an `author="admin"` revision (the rollback branch), parent = pre-rollback.
+      4. Update HEAD and clear the pool.
     """
     ctx = await _build_review_context()
     db = get_db_manager()
     graph = get_graph_service()
     search = get_search_indexer()
-    from sqlalchemy import select, update, delete
-    from db.models import Edge, GlossaryKeyword, Node
 
     rows = ctx.rows_for_node(node_uuid)
     if not rows:
         raise HTTPException(404, t("api.review.no_changes_for_node").format(node_uuid=node_uuid))
 
     try:
-        messages = []
-        
+        store = ctx.store
+        # Snapshot the pending pool so we can restore it if the revert fails.
+        # (Original behavior: a failed rollback leaves the group in the pool.)
+        pool_backup = store.load_all_changed_rows()
+        old_head = store.get_head_revision_id()
+        pre_rev_id = None
+
+        # 1. Commit the current pool as a pre-rollback revision in its own session,
+        #    so it persists independently of the revert outcome.
+        if pool_backup:
+            async with db.session() as session:
+                pre_rev_id = await commit_revision(
+                    session, old_head, "", pool_backup,
+                    author="ai", message="pre-rollback snapshot",
+                )
+            store.set_head_revision_id(pre_rev_id)
+            store.reset_pool()
+
         async with db.session() as session:
-            # 1. The Ultimate Rollback: Node Creation.
-            # If the 'nodes' table has a row where 'before' is None, this node didn't exist before.
-            # Therefore, rolling back means wiping out the entire node and its cascades.
-            node_created = any(r["table"] == "nodes" and r["before"] is None for r in rows)
-            if node_created:
-                await graph.cascade_delete_node(session, node_uuid)
-                messages.append("Deleted created node and its dependencies.")
-            else:
-                # Revert Path Changes by sorting lengths
-                path_rows = [r for r in rows if r["table"] == "paths"]
-                path_creations = [r for r in path_rows if r["before"] is None and r["after"] is not None]
-                path_creations.sort(key=lambda r: len(r["after"]["path"].split("/")), reverse=True) # remove children first
-                path_deletions = [r for r in path_rows if r["before"] is not None and r["after"] is None]
-                path_deletions.sort(key=lambda r: len(r["before"]["path"].split("/"))) # restore parents first
-                
-                # 2a. Remove created paths
-                for r in path_creations:
-                    try:
-                        await graph.remove_path(r["after"]["path"], r["after"]["domain"], session=session, namespace=r["after"].get("namespace"))
-                        messages.append(f"Removed path '{r['after']['path']}'.")
-                    except ValueError as e:
-                        if "not found" not in str(e):
-                            raise e
-                        
-                # 2b. Restore deleted paths
-                for r in path_deletions:
-                    edge_id = r["before"].get("edge_id")
-                    edge_before = None
-                    
-                    # Try to find the original edge metadata from the changeset
-                    for er in rows:
-                        if er["table"] == "edges" and (er["before"] or {}).get("id") == edge_id:
-                            edge_before = er["before"]
-                            break
-                    
-                    parent_uuid = edge_before.get("parent_uuid") if edge_before else None
-                    child_uuid = edge_before.get("child_uuid") if edge_before else None
-                    priority = edge_before.get("priority", 0) if edge_before else 0
-                    disclosure = edge_before.get("disclosure") if edge_before else None
-                    
-                    # If edge wasn't deleted/changed, pull missing metadata from live DB
-                    if (parent_uuid is None or child_uuid is None) and edge_id:
-                        edge_db = (await session.execute(select(Edge).where(Edge.id == edge_id))).scalar_one_or_none()
-                        if edge_db:
-                            parent_uuid = edge_db.parent_uuid
-                            child_uuid = edge_db.child_uuid
-                            priority = edge_db.priority
-                            disclosure = edge_db.disclosure
-                                
-                    target_node_uuid = child_uuid or node_uuid
-                                
-                    await graph.restore_path(
-                        path=r["before"]["path"],
-                        domain=r["before"]["domain"],
-                        node_uuid=target_node_uuid,
-                        parent_uuid=parent_uuid,
-                        priority=priority,
-                        disclosure=disclosure,
-                        session=session,
-                        namespace=r["before"].get("namespace")
-                    )
-                    messages.append(f"Restored path '{r['before']['path']}'.")
+            # 2. Revert DB rows to before state (shared universal rollback logic).
+            messages = await _revert_rows_to_before(session, graph, search, rows, fallback_node_uuid=node_uuid)
 
-                # 3. Revert Edge Metadata Changes (Priority / Disclosure)
-                for r in rows:
-                    if r["table"] == "edges" and r["before"] and r["after"]:
-                        old_p = r["before"].get("priority")
-                        old_d = r["before"].get("disclosure")
-                        # If properties changed, issue an explicit DB UPDATE to revert them
-                        if old_p != r["after"].get("priority") or old_d != r["after"].get("disclosure"):
-                            await session.execute(
-                                update(Edge).where(Edge.id == r["before"]["id"]).values(
-                                    priority=old_p, disclosure=old_d
-                                )
-                            )
-                            messages.append("Restored edge metadata.")
+            # 3. Commit the rollback itself as an admin revision branching from HEAD.
+            rollback_rows = {
+                _make_row_key(r["table"], r["before"] if r["before"] else r["after"]): r
+                for r in rows
+            }
+            await commit_revision(
+                session, store.get_head_revision_id(), "", rollback_rows,
+                author="admin", message=f"rollback node {node_uuid}",
+            )
+            from db.models import Revision
+            from sqlalchemy import select
+            new_rev = (await session.execute(
+                select(Revision).order_by(Revision.id.desc()).limit(1)
+            )).scalar_one()
+            store.set_head_revision_id(new_rev.id)
 
-                # 4. Revert Memory Content (Revive old deprecated memory version)
-                for r in rows:
-                    # Find the old memory row that was active ('deprecated' == False) before the changes
-                    if r["table"] == "memories" and r["before"] and not r["before"].get("deprecated"):
-                        old_active_mem_id = r["before"].get("id")
-                        try:
-                            # rollback_to_memory automatically deprecates the current memory
-                            # and un-deprecates the old one
-                            # When admin does a rollback, it rebuilds FTS docs for ALL namespaces
-                            await graph.rollback_to_memory(old_active_mem_id, session=session)
-                            messages.append(f"Restored previous memory content ({old_active_mem_id}).")
-                        except ValueError as exc:
-                            raise RuntimeError(
-                                t("api.review.cannot_restore_memory").format(memory_id=old_active_mem_id, error=exc)
-                            ) from exc
-
-                # 5. Revert Glossary Keywords
-                for r in rows:
-                    if r["table"] == "glossary_keywords":
-                        if r["before"] is None and r["after"] is not None:
-                            # Revert creation -> delete
-                            await session.execute(
-                                delete(GlossaryKeyword).where(
-                                    GlossaryKeyword.keyword == r["after"]["keyword"],
-                                    GlossaryKeyword.node_uuid == r["after"]["node_uuid"],
-                                    GlossaryKeyword.namespace == r["after"].get("namespace", "")
-                                )
-                            )
-                            messages.append(f"Reverted glossary keyword addition ('{r['after']['keyword']}').")
-                        elif r["before"] is not None and r["after"] is None:
-                            # Revert deletion -> create
-                            b = r["before"]
-                            
-                            # Check if target node still exists to avoid foreign key error
-                            node_exists = (await session.execute(
-                                select(Node).where(Node.uuid == b["node_uuid"])
-                            )).scalar_one_or_none()
-                            
-                            if not node_exists:
-                                messages.append(f"Target node for glossary keyword ('{b['keyword']}') no longer exists, skipped restore.")
-                                continue
-
-                            # Check if the keyword already exists (e.g. manually re-added) to avoid unique constraint conflict
-                            existing = (await session.execute(
-                                select(GlossaryKeyword).where(
-                                    GlossaryKeyword.keyword == b["keyword"],
-                                    GlossaryKeyword.node_uuid == b["node_uuid"],
-                                    GlossaryKeyword.namespace == b.get("namespace", "")
-                                )
-                            )).scalar_one_or_none()
-                            
-                            if not existing:
-                                entry = GlossaryKeyword(
-                                    keyword=b["keyword"],
-                                    node_uuid=b["node_uuid"],
-                                    namespace=b.get("namespace", "")
-                                )
-                                session.add(entry)
-                                messages.append(f"Restored glossary keyword ('{b['keyword']}').")
-                            else:
-                                messages.append(f"Glossary keyword ('{b['keyword']}') already exists, skipped restore.")
-
-            await search.rebuild_all_search_documents(session=session)
-
-        if not messages:
-            messages.append("No rollback action required.")
-
-        ctx.store.remove_keys(ctx.keys_for_node(node_uuid))
+        # 4. Pool already cleared in step 1 (or was empty).
+        store.reset_pool()
 
         return GroupRollbackResponse(node_uuid=node_uuid, success=True, message=" ".join(messages))
     except Exception as e:
+        # Restore the pool so the failed-rollback group is still reviewable.
+        if pool_backup:
+            ctx.store._restore_pool(pool_backup)
+        # Rewind HEAD to its pre-rollback position (the pre-snapshot revision
+        # stays in the tree as an abandoned node, but HEAD no longer points at it).
+        ctx.store.set_head_revision_id(old_head)
         return GroupRollbackResponse(node_uuid=node_uuid, success=False, message=t("api.review.rollback_failed").format(error=e))
 
 
@@ -797,25 +865,42 @@ async def rollback_group(node_uuid: str):
 async def approve_group(node_uuid: str):
     """
     Approve changes for a node group.
-    
-    This does not touch the DB; it simply clears the tracked rows from the
-    changeset JSON, indicating the human has reviewed and accepted them.
+
+    Rows move into the `approved` staging pool (not deleted). When the pending
+    pool drains to empty, the accumulated approved batch is committed as a
+    single `author="ai"` revision on the tree and HEAD advances.
     """
     ctx = await _build_review_context()
     keys = ctx.keys_for_node(node_uuid)
-    count = ctx.store.remove_keys(keys)
+    count = ctx.store.pool_approved(keys)
     if count == 0:
         raise HTTPException(404, t("api.review.no_changes_for_node").format(node_uuid=node_uuid))
+
+    # If the pending pool is now empty, commit the approved batch as a revision.
+    if ctx.store.get_change_count() == 0:
+        db = get_db_manager()
+        async with db.session() as session:
+            await _commit_pending_as_revision(session, ctx.store, author="ai", message="approved batch")
+
     return {"message": t("api.review.approved_node").format(node_uuid=node_uuid, count=count)}
 
 
 @router.delete("")
 async def clear_all():
-    """Approve/Integrate all pending changes globally by emptying the changeset."""
+    """Approve/Integrate all pending changes globally by emptying the changeset.
+
+    Commits the full pending pool as a single `author="ai"` revision, then
+    clears the pool and advances HEAD.
+    """
     store = get_changeset_store()
-    count = store.clear_all()
+    count = store.get_change_count()
     if count == 0:
         raise HTTPException(404, t("api.review.no_pending_changes"))
+
+    db = get_db_manager()
+    async with db.session() as session:
+        await _commit_pending_as_revision(session, store, author="ai", message="clear_all integration")
+    # _commit_pending_as_revision already drains the approved pool and resets.
     return {"message": t("api.review.all_integrated").format(count=count)}
 
 
@@ -860,3 +945,98 @@ async def compare_text(request: DiffRequest):
     """Generic text diffing utility for the frontend."""
     diff_html, diff_unified, summary = get_text_diff(request.text_a, request.text_b)
     return DiffResponse(diff_html=diff_html, diff_unified=diff_unified, summary=summary)
+
+
+
+@router.get("/revisions")
+async def list_revisions(namespace: str = ""):
+    """Return the revision tree (lightweight nodes), optionally namespace-filtered."""
+    db = get_db_manager()
+    async with db.session() as session:
+        nodes = await get_revision_tree(session, namespace=namespace)
+    return {"revisions": nodes, "head_revision_id": get_changeset_store().get_head_revision_id()}
+
+
+@router.post("/revisions/{revision_id}/checkout")
+async def checkout_revision_endpoint(revision_id: int):
+    """Switch HEAD to `revision_id` by reverting to its state.
+
+    First version supports only ancestor checkout (rewind to a prior point on
+    the current branch). Cross-branch switching returns HTTP 501.
+
+    Rewind strategy: walk HEAD -> target (exclusive), accumulating each
+    revision's `before` snapshots; revert the accumulated rows to their
+    `before` state; commit the checkout as an `author="admin"` revision whose
+    parent is the target; advance HEAD to the new revision.
+    """
+    import json as _json
+    from sqlalchemy import select
+    from db.models import Revision
+
+    store = get_changeset_store()
+    db = get_db_manager()
+    graph = get_graph_service()
+    search = get_search_indexer()
+
+    head_id = store.get_head_revision_id()
+
+    async with db.session() as session:
+        # 1. Commit any pending pool as a pre-checkout snapshot (if non-empty).
+        await _commit_pending_as_revision(session, store, author="ai", message="pre-checkout snapshot")
+        head_id = store.get_head_revision_id() or head_id
+
+        target = await get_revision(session, revision_id)
+        if target is None:
+            raise HTTPException(404, f"revision {revision_id} not found")
+
+        # 2. Ancestor check. Cross-branch -> 501.
+        if head_id is not None and not await is_ancestor(session, revision_id, head_id):
+            raise HTTPException(
+                status_code=501,
+                detail="跨分支切换暂未实现 (cross-branch checkout not implemented). "
+                       "Only rewinding to an ancestor of the current HEAD is supported.",
+            )
+
+        # 3. Walk HEAD -> target (exclusive), accumulating `before` snapshots.
+        accumulated: Dict[str, dict] = {}
+        cur_id = head_id
+        while cur_id is not None and cur_id != revision_id:
+            cur = await get_revision(session, cur_id)
+            if cur is None:
+                break
+            try:
+                rev_rows = _json.loads(cur.changeset) if cur.changeset else {}
+            except (ValueError, TypeError):
+                rev_rows = {}
+            for key, row in rev_rows.items():
+                # Prefer the earliest `before` along the path (closest to target).
+                if key not in accumulated and row.get("before") is not None:
+                    accumulated[key] = row
+            cur_id = cur.parent_id
+
+        # 4. Revert accumulated rows to their before state.
+        revert_rows = list(accumulated.values())
+        if revert_rows:
+            await _revert_rows_to_before(session, graph, search, revert_rows, fallback_node_uuid=None)
+
+        # 5. Commit the checkout as an admin revision, parent = target.
+        checkout_rows = {
+            _make_row_key(r["table"], r["before"] if r["before"] else r["after"]): r
+            for r in revert_rows
+        }
+        await commit_revision(
+            session, revision_id, "", checkout_rows,
+            author="admin", message=f"checkout to revision {revision_id}",
+        )
+        new_rev = (await session.execute(
+            select(Revision).order_by(Revision.id.desc()).limit(1)
+        )).scalar_one()
+        store.set_head_revision_id(new_rev.id)
+
+    store.reset_pool()
+    return {
+        "success": True,
+        "head_revision_id": store.get_head_revision_id(),
+        "checked_out_from": revision_id,
+        "reverted_rows": len(accumulated),
+    }
