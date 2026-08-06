@@ -775,16 +775,37 @@ async def _commit_pending_as_revision(session, store, author="ai", message=None)
     """Commit the full pending + approved pool as one revision node, update HEAD.
 
     If the pool is empty, no revision is created and HEAD is unchanged.
-    Returns the new revision id, or None if nothing was committed.
+    If the pool contents hash matches the last checkpoint hash (i.e. the
+    pool has already been captured as a revision by commit_checkpoint and
+    nothing has changed since), the data is already persisted as a revision;
+    we still drain the pool but do not create a duplicate revision.
+    Returns the new revision id, or None if nothing new was committed.
     """
+    import hashlib as _hashlib
+    import json as _json
     rows = store.load_all_changed_rows()
     if not rows:
         return None
+
+    # De-dupe against the most recent checkpoint so approve/clear_all does
+    # not duplicate a revision that commit_checkpoint already created.
+    pool_hash = _hashlib.sha256(
+        _json.dumps(rows, sort_keys=True, ensure_ascii=False).encode()
+    ).hexdigest()
+    if pool_hash == getattr(store, "_last_checkpoint_hash", None):
+        # The current pool state is already captured by the HEAD revision
+        # (the most recent checkpoint). Just drain the pool; HEAD stays.
+        store.drain_approved()
+        store.reset_pool()
+        store._last_checkpoint_hash = None  # pool drained, hash no longer valid
+        return None
+
     parent_id = store.get_head_revision_id()
     new_id = await commit_revision(session, parent_id, "", rows, author=author, message=message)
     store.set_head_revision_id(new_id)
     store.drain_approved()
     store.reset_pool()
+    store._last_checkpoint_hash = None  # pool drained, hash no longer valid
     return new_id
 
 
@@ -849,6 +870,7 @@ async def rollback_group(node_uuid: str):
 
         # 4. Pool already cleared in step 1 (or was empty).
         store.reset_pool()
+        store._last_checkpoint_hash = None  # pool drained; checkpoint no longer valid
 
         return GroupRollbackResponse(node_uuid=node_uuid, success=True, message=" ".join(messages))
     except Exception as e:
@@ -1034,6 +1056,7 @@ async def checkout_revision_endpoint(revision_id: int):
         store.set_head_revision_id(new_rev.id)
 
     store.reset_pool()
+    store._last_checkpoint_hash = None  # pool drained; checkpoint no longer valid
     return {
         "success": True,
         "head_revision_id": store.get_head_revision_id(),

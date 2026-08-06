@@ -34,7 +34,11 @@ from db import (
     get_search_indexer, close_db, get_preset_service,
 )
 from db.namespace import get_namespace
-from db.snapshot import get_changeset_store
+from db.snapshot import get_changeset_store, commit_checkpoint
+from models.mcp_results import (
+    ToolResult, CreateResult, UpdateResult, ForgetResult,
+    LinkResult, TagResult, ArchiveResult
+)
 from text_patch import (
     normalize_with_positions,
     find_valid_matches,
@@ -557,7 +561,7 @@ async def remember_child_memory(
     when: str = "", 
     title: Optional[str] = None,
     time: Optional[str] = None,
-) -> str:
+) -> ToolResult | CreateResult:
     """
     把一段新的记忆放在某个已有的父节点下。父节点通常是你自然
     会想到的那件事——当你想起来父节点的时候，这个子节点也会浮现。
@@ -591,11 +595,11 @@ async def remember_child_memory(
 
     try:
         if not when or not when.strip():
-            return "每条记忆都需要一个「什么时候会想起」的条件(when)。不写的话这条记忆就永远找不到了。"
+            return ToolResult(message="每条记忆都需要一个「什么时候会想起」的条件(when)。不写的话这条记忆就永远找不到了。")
 
         if title:
             if not re.match(r"^[a-zA-Z0-9_-]+$", title):
-                return "标题只能包含字母、数字、连字符和下划线（不能有空格、斜杠、特殊字符）。"
+                return ToolResult(message="标题只能包含字母、数字、连字符和下划线（不能有空格、斜杠、特殊字符）。")
 
         domain, parent_path = parse_uri(parent_uri)
 
@@ -632,18 +636,27 @@ async def remember_child_memory(
         created_uri = result.get("uri", make_uri(domain, result["path"]))
         _record_rows(before_state={}, after_state=result.get("rows_after", {}))
 
+        db = get_db_manager()
+        async with db.session() as session:
+            rev_id = await commit_checkpoint(session)
+
         msg = f"记住了：「{created_uri}」"
         if final_world_time:
             msg += f" (发生于 {final_world_time})"
             
         if result.get("path"):
             msg += f"\n\n新记的事已经放好了。你看看和它相关的其他记忆有没有什么要整理的？"
-        return msg
+        return CreateResult(
+            message=msg,
+            revision_id=rev_id,
+            node_uuid=result["node_uuid"],
+            uri=created_uri,
+        )
 
     except ValueError as e:
-        return f"没记住：{str(e)}"
+        return ToolResult(message=f"没记住：{str(e)}")
     except Exception as e:
-        return f"没记住：{str(e)}"
+        return ToolResult(message=f"没记住：{str(e)}")
 
 
 # ── 修改 ──────────────────────────────────────────────────────────────────
@@ -659,7 +672,7 @@ async def edit_memory(
     importance: Optional[int] = None,
     when: Optional[str] = None,
     time: Optional[str] = None,
-) -> str:
+) -> ToolResult | UpdateResult:
     """修改一段记忆的内容。
 
     支持三种编辑方式（三选一）：
@@ -726,7 +739,7 @@ async def edit_memory(
         # ── 读取当前内容 ──
         memory = await graph.get_memory_by_path(path, domain, namespace=get_namespace())
         if not memory:
-            return f"没找到「{full_uri}」这条记忆。"
+            return ToolResult(message=f"没找到「{full_uri}」这条记忆。")
 
         current_content = memory.get("content", "")
         content = None
@@ -772,7 +785,7 @@ async def edit_memory(
             # 行编辑模式
             lines = current_content.split("\n")
             if line < 1 or line > len(lines):
-                return f"行号 {line} 超出范围。这个记忆一共有 {len(lines)} 行。"
+                return ToolResult(message=f"行号 {line} 超出范围。这个记忆一共有 {len(lines)} 行。")
             lines[line - 1] = line_content
             content = "\n".join(lines)
 
@@ -791,21 +804,32 @@ async def edit_memory(
             after_state=result.get("rows_after", {}),
         )
 
+        db = get_db_manager()
+        async with db.session() as session:
+            rev_id = await commit_checkpoint(session)
+
         msg = f"已经改好了：「{full_uri}」"
         if final_world_time:
             msg += f" (时间更新为: {final_world_time})"
-        return msg
+        return UpdateResult(
+            message=msg,
+            revision_id=rev_id,
+            node_uuid=result["node_uuid"],
+            uri=full_uri,
+            old_memory_id=result.get("old_memory_id"),
+            new_memory_id=result.get("new_memory_id"),
+        )
 
     except ValueError as e:
-        return f"没改掉：{str(e)}"
+        return ToolResult(message=f"没改掉：{str(e)}")
     except Exception as e:
-        return f"没改掉：{str(e)}"
+        return ToolResult(message=f"没改掉：{str(e)}")
 
 
 # ── 删除 ──────────────────────────────────────────────────────────────────
 
 @write_tool()
-async def forget_memory(uri: str) -> str:
+async def forget_memory(uri: str) -> ToolResult | ForgetResult:
     """忘掉一段记忆。删除前会自动备份到 staging/ 目录。
 
     删除的是这个 URI 路径下的记录。如果这个记忆还有其他入口
@@ -828,7 +852,7 @@ async def forget_memory(uri: str) -> str:
 
         memory = await graph.get_memory_by_path(path, domain, namespace=get_namespace())
         if not memory:
-            return f"没找到「{full_uri}」这条记忆。"
+            return ToolResult(message=f"没找到「{full_uri}」这条记忆。")
 
         result = await graph.remove_path(path, domain, namespace=get_namespace())
         rows_before = result.get("rows_before", {})
@@ -840,16 +864,16 @@ async def forget_memory(uri: str) -> str:
 
         deleted_path_count = len(rows_before.get("paths", []))
         descendant_count = max(0, deleted_path_count - 1)
-        msg = f"忘掉了「{full_uri}」"
+        msg = f"忘掉了：「{full_uri}」"
         if descendant_count > 0:
             msg += f"（连带清掉了 {descendant_count} 个子节点）"
 
         return msg
 
     except ValueError as e:
-        return f"没忘掉：{str(e)}"
+        return ToolResult(message=f"没忘掉：{str(e)}")
     except Exception as e:
-        return f"没忘掉：{str(e)}"
+        return ToolResult(message=f"没忘掉：{str(e)}")
 
 
 # ── 关联 ──────────────────────────────────────────────────────────────────
@@ -860,7 +884,7 @@ async def link_memory(
     new_uri: str,
     importance: int,
     when: str,
-) -> str:
+) -> ToolResult | LinkResult:
     """同一条记忆多放一个入口。
 
     不是复制内容，只是在另一个位置开一扇门，指向同一条记忆。
@@ -906,12 +930,21 @@ async def link_memory(
         alias_uri = result.get("new_uri", new_uri)
         msg = f"在「{alias_uri}」也能想起「{target_uri}」了。"
 
-        return msg
+        db = get_db_manager()
+        async with db.session() as session:
+            rev_id = await commit_checkpoint(session)
+
+        return LinkResult(
+            message=msg,
+            revision_id=rev_id,
+            target_uri=target_uri,
+            new_uri=alias_uri,
+        )
 
     except ValueError as e:
-        return f"没加上：{str(e)}"
+        return ToolResult(message=f"没加上：{str(e)}")
     except Exception as e:
-        return f"没加上：{str(e)}"
+        return ToolResult(message=f"没加上：{str(e)}")
 
 
 @write_tool()
@@ -919,7 +952,7 @@ async def tag_memory(
     uri: str,
     add: Optional[List[str]] = None,
     remove: Optional[List[str]] = None,
-) -> str:
+) -> ToolResult | TagResult:
     """给一段记忆贴上触发词标签。
 
     贴上标签后，当其他记忆的内容里出现这个词时，这条记忆会被
@@ -952,7 +985,7 @@ async def tag_memory(
 
         memory = await graph.get_memory_by_path(path, domain, namespace=get_namespace())
         if not memory:
-            return f"没找到「{full_uri}」。"
+            return ToolResult(message=f"没找到「{full_uri}」。")
 
         node_uuid = memory["node_uuid"]
 
@@ -1019,7 +1052,17 @@ async def tag_memory(
         else:
             lines.append("  现在没有标签。")
 
-        return "\n".join(lines)
+        db = get_db_manager()
+        async with db.session() as session:
+            rev_id = await commit_checkpoint(session)
+
+        return TagResult(
+            message="\n".join(lines),
+            revision_id=rev_id,
+            node_uuid=node_uuid,
+            added=added,
+            removed=removed,
+        )
 
     except ValueError as e:
         return f"标签没改：{str(e)}"
@@ -1035,7 +1078,7 @@ async def merge_memories(
     target_uri: str,
     content: str,
     reason: Optional[str] = None,
-) -> str:
+) -> ToolResult | CreateResult:
     """把多条记忆合并成一条。
 
     当你发现好几段记忆其实是在说同一件事的时候，就可以把它们合起来。
@@ -1062,7 +1105,7 @@ async def merge_memories(
 
     try:
         if len(uris) < 2:
-            return "至少需要两条记忆才能合并。"
+            return ToolResult(message="至少需要两条记忆才能合并。")
 
         target_domain, target_path = parse_uri(target_uri)
         namespace = get_namespace()
@@ -1074,7 +1117,7 @@ async def merge_memories(
             domain, path = parse_uri(uri)
             memory = await graph.get_memory_by_path(path, domain, namespace=namespace)
             if not memory:
-                return f"没找到源记忆「{uri}」。"
+                return ToolResult(message=f"没找到源记忆「{uri}」。")
             sources.append((domain, path, memory))
             # 收集标签
             node_glossary = await glossary.get_glossary_for_node(memory["node_uuid"], namespace=namespace)
@@ -1133,7 +1176,16 @@ async def merge_memories(
             transferred = len(set(source_glossary_keywords))
             msg += f"\n转移了 {transferred} 个标签到新记忆"
 
-        return msg
+        db = get_db_manager()
+        async with db.session() as session:
+            rev_id = await commit_checkpoint(session)
+
+        return CreateResult(
+            message=msg,
+            revision_id=rev_id,
+            node_uuid=target_node_uuid or "",
+            uri=created_uri,
+        )
 
     except ValueError as e:
         return f"合并没成功：{str(e)}"
@@ -1150,7 +1202,7 @@ async def organize_memory(
     importance: int = 3,
     when: Optional[str] = None,
     tags: Optional[List[str]] = None,
-) -> str:
+) -> ToolResult | CreateResult:
     """把几段相关的记忆整理成一个主题。
 
     当你发现几段零散的记忆其实属于同一个主题时，可以用这个工具
@@ -1177,10 +1229,10 @@ async def organize_memory(
 
     try:
         if not source_uris:
-            return "至少需要一条源记忆来整理。"
+            return ToolResult(message="至少需要一条源记忆来整理。")
 
         if mode not in ("move", "link", "keep"):
-            return "mode 必须是 move、link 或 keep。"
+            return ToolResult(message="mode 必须是 move、link 或 keep。")
 
         target_domain, target_path = parse_uri(target_uri)
         namespace = get_namespace()
@@ -1254,12 +1306,21 @@ async def organize_memory(
         if tags:
             msg_parts.append(f"  标签：{', '.join(tags)}")
 
-        return "\n".join(msg_parts)
+        db = get_db_manager()
+        async with db.session() as session:
+            rev_id = await commit_checkpoint(session)
+
+        return CreateResult(
+            message="\n".join(msg_parts),
+            revision_id=rev_id,
+            node_uuid=target_node_uuid or "",
+            uri=topic_uri,
+        )
 
     except ValueError as e:
-        return f"没整理好：{str(e)}"
+        return ToolResult(message=f"没整理好：{str(e)}")
     except Exception as e:
-        return f"没整理好：{str(e)}"
+        return ToolResult(message=f"没整理好：{str(e)}")
 
 
 # ── 存档 ──────────────────────────────────────────────────────────────────
@@ -1271,7 +1332,7 @@ async def archive_memory(
     mode: str = "char",
     raw: Optional[str] = None,
     time: Optional[str] = None,
-) -> str:
+) -> ToolResult | ArchiveResult:
     """把刚才发生的事存档到历史记录里。
 
     每轮对话或场景结束后，用这个工具把发生了什么记到 history 域。
@@ -1292,10 +1353,10 @@ async def archive_memory(
         namespace = get_namespace()
 
         if not history.strip():
-            return "history 不能为空。写一下刚才发生了什么。"
+            return ToolResult(message="history 不能为空。写一下刚才发生了什么。")
             
         if not title or not re.match(r"^[a-zA-Z0-9_-]+$", title):
-            return "title 必须提供，且只能包含字母、数字、连字符和下划线（如 'first_encounter'）。"
+            return ToolResult(message="title 必须提供，且只能包含字母、数字、连字符和下划线（如 'first_encounter'）。")
 
         # --- 世界时间处理 ---
         config = get_config()
@@ -1338,7 +1399,15 @@ async def archive_memory(
         if final_world_time:
             msg += f" (世界时间: {final_world_time})"
             
-        return msg
+        db = get_db_manager()
+        async with db.session() as session:
+            rev_id = await commit_checkpoint(session)
+
+        return ArchiveResult(
+            message=msg,
+            revision_id=rev_id,
+            uri=f"history://scenes/{title}",
+        )
 
     except ValueError as e:
         return f"存档失败：{str(e)}"

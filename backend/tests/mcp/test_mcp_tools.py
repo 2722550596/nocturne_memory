@@ -43,17 +43,15 @@ async def test_browse_memory_system_views(mcp_module, graph_service):
     recent = await mcp_module.browse_memory("system://recent/5")
     index_all = await mcp_module.browse_memory("system://index")
 
-    assert "core://agent" in boot
-    assert "core://my_user" in boot
+    assert "core://agent" in getattr(boot, "message", str(boot))
+    assert "core://my_user" in getattr(boot, "message", str(boot))
     # The boot view advertises the index entry point.
-    assert "system://index/<domain>" in boot
-    assert "core://agent" in index_view
-    assert "core://my_user" in recent
+    assert "system://index/<domain>" in getattr(boot, "message", str(boot))
+    assert "core://agent" in getattr(index_view, "message", str(index_view))
+    assert "core://my_user" in getattr(recent, "message", str(recent))
     # system://index without a domain renders the full index across all
     # domains instead of erroring.
-    assert "core://agent" in index_all
-
-
+    assert "core://agent" in getattr(index_all, "message", str(index_all))
 @pytest.mark.asyncio
 async def test_diagnostic_view_points_duplicate_aliases_to_forget_memory(mcp_module):
     """Duplicate aliases are surfaced and the hint references forget_memory."""
@@ -73,15 +71,13 @@ async def test_diagnostic_view_points_duplicate_aliases_to_forget_memory(mcp_mod
 
     diagnostic = await mcp_module.browse_memory("system://diagnostic/core")
 
-    assert "### 3.2 Duplicate Aliases under Same Parent" in diagnostic
-    assert "core://folder" in diagnostic
-    assert "core://folder_copy" in diagnostic
+    assert "### 3.2 Duplicate Aliases under Same Parent" in getattr(diagnostic, "message", str(diagnostic))
+    assert "core://folder" in getattr(diagnostic, "message", str(diagnostic))
+    assert "core://folder_copy" in getattr(diagnostic, "message", str(diagnostic))
     # The remediation hint must reference the current RP tool name
     # (forget_memory), not the legacy delete_memory verb.
-    assert "forget_memory" in diagnostic
-    assert "delete_memory" not in diagnostic
-
-
+    assert "forget_memory" in getattr(diagnostic, "message", str(diagnostic))
+    assert "delete_memory" not in getattr(diagnostic, "message", str(diagnostic))
 @pytest.mark.asyncio
 async def test_mcp_tool_flow_covers_crud_alias_triggers_and_search(mcp_module, graph_service):
     created = await mcp_module.remember_child_memory(
@@ -111,12 +107,12 @@ async def test_mcp_tool_flow_covers_crud_alias_triggers_and_search(mcp_module, g
     current = await graph_service.get_memory_by_path("salem_note", "core")
     removed_alias = await graph_service.get_memory_by_path("salem_alias", "project")
 
-    assert "core://salem_note" in created
-    assert "core://salem_note" in updated
-    assert "Salem" in triggers
-    assert "core://salem_note" in search
-    assert "project://salem_alias" in alias
-    assert "project://salem_alias" in deleted
+    assert "core://salem_note" in getattr(created, "message", str(created))
+    assert "core://salem_note" in getattr(updated, "message", str(updated))
+    assert "Salem" in getattr(triggers, "message", str(triggers))
+    assert "core://salem_note" in getattr(search, "message", str(search))
+    assert "project://salem_alias" in getattr(alias, "message", str(alias))
+    assert "project://salem_alias" in getattr(deleted, "message", str(deleted))
     assert current["content"].endswith("GraphService handles aliases.")
     assert removed_alias is None
 
@@ -216,16 +212,14 @@ class TestTryNormalizedPatch:
         )
         assert result is not None
         assert '"goodbye"' in result
-        assert "to him." in result
-
+        assert "to him." in getattr(result, "message", str(result))
     def test_dash_variant_patch(self):
         content = "range: 10\u201420"
         result = try_normalized_patch(
             content, "range: 10-20", "range: 10-30"
         )
         assert result is not None
-        assert "10-30" in result
-
+        assert "10-30" in getattr(result, "message", str(result))
     def test_trailing_whitespace_patch(self):
         content = "hello   \nworld"
         result = try_normalized_patch(
@@ -286,9 +280,8 @@ async def test_edit_memory_falls_back_to_normalized_patch(
         old_text='Nocturne said "I will not kneel."',
         new_text='Nocturne said "I refuse to kneel."',
     )
-    assert "core://norm_test" in result
-    assert "改好" in result
-
+    assert "core://norm_test" in getattr(result, "message", str(result))
+    assert "改好" in getattr(result, "message", str(result))
     memory = await graph_service.get_memory_by_path("norm_test", "core")
     assert '"I refuse to kneel."' in memory["content"]
     assert "That is final." in memory["content"]
@@ -310,7 +303,7 @@ async def test_edit_memory_exact_match_takes_priority(
         old_text="Hello",
         new_text="Goodbye",
     )
-    assert "改好" in result
+    assert "改好" in getattr(result, "message", str(result))
     memory = await graph_service.get_memory_by_path("exact_test", "core")
     assert memory["content"] == "Goodbye World"
 
@@ -360,8 +353,8 @@ async def test_remember_child_memory_preserves_all_content_verbatim(
             when="When verifying verbatim storage",
             title=f"verbatim_{title_suffix}",
         )
-        assert "core://" in result, f"Failed for {title_suffix}"
-        assert "记住" in result, f"Failed for {title_suffix}"
+        assert "core://" in getattr(result, "message", str(result)), f"Failed for {title_suffix}"
+        assert "记住" in getattr(result, "message", str(result)), f"Failed for {title_suffix}"
         memory = await graph_service.get_memory_by_path(f"verbatim_{title_suffix}", "core")
         assert memory["content"] == content, f"Content mismatch for {title_suffix}"
 
@@ -384,7 +377,7 @@ async def test_edit_memory_preserves_literal_backslash_sequences(
         new_text=r"D:\logs\test",
     )
 
-    assert "改好" in result
+    assert "改好" in getattr(result, "message", str(result))
     memory = await graph_service.get_memory_by_path("literal_backslash_update", "core")
     assert memory["content"] == r"Store D:\logs\test and regex foo\\nbar literally."
 
@@ -409,7 +402,7 @@ async def test_edit_memory_normalizes_escaped_newlines_on_patch_fallback(
         new_text="# Title\\n\\n- gamma\\n- delta",
     )
 
-    assert "改好" in result
+    assert "改好" in getattr(result, "message", str(result))
     memory = await graph_service.get_memory_by_path("escaped_multiline_update", "core")
     assert memory["content"] == "# Title\n\n- gamma\n- delta"
 
@@ -434,7 +427,7 @@ async def test_edit_memory_exact_match_wins_over_normalization(
         new_text='payload = "line1\\n\\nline2\\nline3"',
     )
 
-    assert "改好" in result
+    assert "改好" in getattr(result, "message", str(result))
     memory = await graph_service.get_memory_by_path("literal_exact_match", "core")
     assert memory["content"] == 'payload = "line1\\n\\nline2\\nline3"'
 
@@ -456,6 +449,6 @@ async def test_edit_memory_append_preserves_content_verbatim(
         append="\\n\\nCode: foo\\n\\nbar",
     )
 
-    assert "改好" in result
+    assert "改好" in getattr(result, "message", str(result))
     memory = await graph_service.get_memory_by_path("append_verbatim", "core")
     assert memory["content"] == "Base content\\n\\nCode: foo\\n\\nbar"

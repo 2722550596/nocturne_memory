@@ -38,7 +38,7 @@ async def _create(mcp_module, title, content, when="When testing"):
         when=when,
         title=title,
     )
-    assert "记住" in result, f"create failed: {result}"
+    assert "记住" in getattr(result, "message", str(result)), f"create failed: {result}"
     return f"core://{title}"
 
 
@@ -49,9 +49,9 @@ async def _create(mcp_module, title, content, when="When testing"):
 async def test_approve_produces_ai_revision(api_client, mcp_module):
     await _create(mcp_module, "approve_rev_test", "approve-test content")
 
-    # No revisions before any approve.
+    # create produces an `ai` checkpoint revision (commit_checkpoint on write).
     revs = await _revisions(api_client)
-    assert revs["revisions"] == []
+    assert len(revs["revisions"]) == 1
 
     groups = await _groups(api_client)
     node_uuid = groups[0]["node_uuid"]
@@ -59,9 +59,12 @@ async def test_approve_produces_ai_revision(api_client, mcp_module):
     approved = await api_client.delete(f"/review/groups/{node_uuid}")
     assert approved.status_code == 200
 
+    # approve does NOT create a duplicate revision: commit_checkpoint already
+    # captured the pool state, so _commit_pending_as_revision de-dupes on the
+    # hash and only drains the pool. HEAD remains the same revision.
     revs = await _revisions(api_client)
     assert len(revs["revisions"]) == 1
-    rev = revs["revisions"][0]
+    rev = revs["revisions"][-1]
     assert rev["author"] == "ai"
     assert rev["is_head"] is True
     assert revs["head_revision_id"] == rev["id"]
@@ -127,7 +130,7 @@ async def test_checkout_rewinds_to_ancestor(api_client, graph_service, mcp_modul
 
     revs = await _revisions(api_client)
     assert len(revs["revisions"]) == 1
-    rev1 = revs["revisions"][0]
+    rev1 = revs["revisions"][-1]
     assert rev1["author"] == "ai"
 
     # v2: edit + approve -> rev2 (ai), parent=rev1

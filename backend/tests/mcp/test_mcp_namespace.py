@@ -156,7 +156,7 @@ async def test_full_mcp_crud_with_namespace_isolation(mcp_env):
         old_text="I am Agent A's identity.",
         new_text="I am Agent A's evolved identity.",
     )
-    assert "改好" in result
+    assert "改好" in getattr(result, "message", str(result))
     assert "evolved" in await browse_memory("core://agent")
 
     set_namespace("agent_b")
@@ -170,8 +170,7 @@ async def test_full_mcp_crud_with_namespace_isolation(mcp_env):
         importance=5,
         when="When mirroring agent identity",
     )
-    assert "writer://agent_copy" in link_result
-
+    assert "writer://agent_copy" in getattr(link_result, "message", str(link_result))
     set_namespace("agent_b")
     alias_b = await browse_memory("writer://agent_copy")
     assert "not found" in alias_b or "出错了" in alias_b
@@ -179,7 +178,7 @@ async def test_full_mcp_crud_with_namespace_isolation(mcp_env):
     # --- Delete isolation ---
     set_namespace("agent_a")
     forget_result = await forget_memory("core://my_user")
-    assert "忘掉" in forget_result
+    assert "忘掉" in getattr(forget_result, "message", str(forget_result))
     deleted = await browse_memory("core://my_user")
     assert "not found" in deleted or "出错了" in deleted
 
@@ -201,15 +200,12 @@ async def test_system_boot_isolation(mcp_env):
 
     set_namespace("agent_a")
     boot_a = await browse_memory("system://boot")
-    assert "Agent A" in boot_a
-    assert "Agent B" not in boot_a
-
+    assert "Agent A" in getattr(boot_a, "message", str(boot_a))
+    assert "Agent B" not in getattr(boot_a, "message", str(boot_a))
     set_namespace("agent_b")
     boot_b = await browse_memory("system://boot")
-    assert "Agent B" in boot_b
-    assert "Agent A" not in boot_b
-
-
+    assert "Agent B" in getattr(boot_b, "message", str(boot_b))
+    assert "Agent A" not in getattr(boot_b, "message", str(boot_b))
 @pytest.mark.asyncio
 async def test_system_boot_per_namespace_uris(mcp_env):
     """Per-namespace boot URI overrides narrow the loaded set."""
@@ -225,15 +221,13 @@ async def test_system_boot_per_namespace_uris(mcp_env):
 
     set_namespace("agent_a")
     boot_a = await browse_memory("system://boot")
-    assert "Agent A" in boot_a
+    assert "Agent A" in getattr(boot_a, "message", str(boot_a))
     # core://my_user is in the global fallback but NOT in agent_a's override.
-    assert "met User" not in boot_a
-
+    assert "met User" not in getattr(boot_a, "message", str(boot_a))
     set_namespace("agent_b")
     boot_b = await browse_memory("system://boot")
-    assert "Agent B" in boot_b
-    assert "Agent A" not in boot_b
-
+    assert "Agent B" in getattr(boot_b, "message", str(boot_b))
+    assert "Agent A" not in getattr(boot_b, "message", str(boot_b))
     await preset.delete_boot_uris("agent_a")
     await preset.delete_boot_uris("agent_b")
 
@@ -262,8 +256,8 @@ async def test_system_boot_per_namespace_empty_override(mcp_env):
         set_namespace("agent_c")
         boot_c = await browse_memory("system://boot")
         # Should NOT load anything (0/0), and must not fall back to global.
-        assert "0/0" in boot_c
-        assert "Agent C" not in boot_c
+        assert "0/0" in getattr(boot_c, "message", str(boot_c))
+        assert "Agent C" not in getattr(boot_c, "message", str(boot_c))
     finally:
         await preset.delete_boot_uris("agent_c")
         await preset.set_boot_uris("", ["core://agent", "core://my_user"])
@@ -283,15 +277,12 @@ async def test_system_index_isolation(mcp_env):
 
     set_namespace("agent_a")
     index_a = await browse_memory("system://index/core")
-    assert "my_user" in index_a
-    assert "notes" in index_a
-
+    assert "my_user" in getattr(index_a, "message", str(index_a))
+    assert "notes" in getattr(index_a, "message", str(index_a))
     set_namespace("agent_b")
     index_b = await browse_memory("system://index/core")
-    assert "my_user" not in index_b
-    assert "notes" not in index_b
-
-
+    assert "my_user" not in getattr(index_b, "message", str(index_b))
+    assert "notes" not in getattr(index_b, "message", str(index_b))
 @pytest.mark.asyncio
 async def test_system_index_domain_isolation(mcp_env):
     """system://index/<domain> only shows paths in the requested domain within the namespace."""
@@ -316,16 +307,13 @@ async def test_system_index_domain_isolation(mcp_env):
 
     set_namespace("agent_a")
     index_core = await browse_memory("system://index/core")
-    assert "a_core" in index_core
-    assert "a_writer" not in index_core
-    assert "b_core" not in index_core
-
+    assert "a_core" in getattr(index_core, "message", str(index_core))
+    assert "a_writer" not in getattr(index_core, "message", str(index_core))
+    assert "b_core" not in getattr(index_core, "message", str(index_core))
     set_namespace("agent_b")
     index_core_b = await browse_memory("system://index/core")
-    assert "b_core" in index_core_b
-    assert "a_core" not in index_core_b
-
-
+    assert "b_core" in getattr(index_core_b, "message", str(index_core_b))
+    assert "a_core" not in getattr(index_core_b, "message", str(index_core_b))
 # ====================================================================
 # 4. system://recent isolation
 # ====================================================================
@@ -340,14 +328,11 @@ async def test_system_recent_isolation(mcp_env):
 
     set_namespace("agent_a")
     recent_a = await browse_memory("system://recent")
-    assert "core://agent" in recent_a
-    assert "my_user" in recent_a
-
+    assert "core://agent" in getattr(recent_a, "message", str(recent_a))
+    assert "my_user" in getattr(recent_a, "message", str(recent_a))
     set_namespace("agent_b")
     recent_b = await browse_memory("system://recent")
-    assert "my_user" not in recent_b
-
-
+    assert "my_user" not in getattr(recent_b, "message", str(recent_b))
 # ====================================================================
 # 5. system://glossary cross-check
 # ====================================================================
@@ -362,15 +347,12 @@ async def test_system_glossary_isolation(mcp_env):
 
     set_namespace("agent_a")
     glossary_a = await browse_memory("system://glossary")
-    assert "soul_trigger_a" in glossary_a
-    assert "soul_trigger_b" not in glossary_a
-
+    assert "soul_trigger_a" in getattr(glossary_a, "message", str(glossary_a))
+    assert "soul_trigger_b" not in getattr(glossary_a, "message", str(glossary_a))
     set_namespace("agent_b")
     glossary_b = await browse_memory("system://glossary")
-    assert "soul_trigger_b" in glossary_b
-    assert "soul_trigger_a" not in glossary_b
-
-
+    assert "soul_trigger_b" in getattr(glossary_b, "message", str(glossary_b))
+    assert "soul_trigger_a" not in getattr(glossary_b, "message", str(glossary_b))
 # ====================================================================
 # 6. search_memory with domain filter + namespace
 # ====================================================================
@@ -385,19 +367,15 @@ async def test_search_memory_domain_filter_isolation(mcp_env):
 
     set_namespace("agent_a")
     result = await search_memory("identity", domain="core")
-    assert "Agent A" in result
-    assert "Agent B" not in result
-
+    assert "Agent A" in getattr(result, "message", str(result))
+    assert "Agent B" not in getattr(result, "message", str(result))
     # agent_a has no writer:// content matching "identity"
     result_writer = await search_memory("identity", domain="writer")
-    assert "Agent A" not in result_writer
-
+    assert "Agent A" not in getattr(result_writer, "message", str(result_writer))
     set_namespace("agent_b")
     result_b = await search_memory("identity", domain="core")
-    assert "Agent B" in result_b
-    assert "Agent A" not in result_b
-
-
+    assert "Agent B" in getattr(result_b, "message", str(result_b))
+    assert "Agent A" not in getattr(result_b, "message", str(result_b))
 # ====================================================================
 # 7. Delete cascade isolation
 # ====================================================================
@@ -451,41 +429,34 @@ async def test_default_namespace_mcp_full_flow(mcp_env):
         "core://", "Default agent identity.", importance=0,
         title="agent", when="When asking who I am",
     )
-    assert "core://agent" in create_agent
+    assert "core://agent" in getattr(create_agent, "message", str(create_agent))
     create_user = await remember_child_memory(
         "core://", "Default user info.", importance=1,
         title="my_user", when="When talking about user",
     )
-    assert "core://my_user" in create_user
-
+    assert "core://my_user" in getattr(create_user, "message", str(create_user))
     # Read
     content = await browse_memory("core://agent")
-    assert "Default agent identity" in content
-
+    assert "Default agent identity" in getattr(content, "message", str(content))
     # Boot
     boot = await browse_memory("system://boot")
-    assert "Default agent identity" in boot
-
+    assert "Default agent identity" in getattr(boot, "message", str(boot))
     # Index
     index = await browse_memory("system://index/core")
-    assert "agent" in index
-    assert "my_user" in index
-
+    assert "agent" in getattr(index, "message", str(index))
+    assert "my_user" in getattr(index, "message", str(index))
     # Recent
     recent = await browse_memory("system://recent")
-    assert "core://agent" in recent
-
+    assert "core://agent" in getattr(recent, "message", str(recent))
     # Update
     update_result = await edit_memory(
         "core://agent", old_text="Default agent identity.",
         new_text="Updated default agent identity.",
     )
-    assert "改好" in update_result
-
+    assert "改好" in getattr(update_result, "message", str(update_result))
     # Search
     results = await search_memory("identity")
-    assert "Updated default agent" in results
-
+    assert "Updated default agent" in getattr(results, "message", str(results))
     # Alias
     link_result = await link_memory(
         target_uri="core://agent",
@@ -493,20 +464,17 @@ async def test_default_namespace_mcp_full_flow(mcp_env):
         importance=5,
         when="When mirroring default agent identity",
     )
-    assert "writer://agent_ref" in link_result
-
+    assert "writer://agent_ref" in getattr(link_result, "message", str(link_result))
     alias_content = await browse_memory("writer://agent_ref")
-    assert "Updated default agent" in alias_content
-
+    assert "Updated default agent" in getattr(alias_content, "message", str(alias_content))
     # Triggers
     trigger_result = await tag_memory("core://agent", add=["default_trigger"])
-    assert "default_trigger" in trigger_result
+    assert "default_trigger" in getattr(trigger_result, "message", str(trigger_result))
     glossary = await browse_memory("system://glossary")
-    assert "default_trigger" in glossary
-
+    assert "default_trigger" in getattr(glossary, "message", str(glossary))
     # Delete
     forget_result = await forget_memory("core://my_user")
-    assert "忘掉" in forget_result
+    assert "忘掉" in getattr(forget_result, "message", str(forget_result))
     deleted = await browse_memory("core://my_user")
     assert "not found" in deleted or "出错了" in deleted
 

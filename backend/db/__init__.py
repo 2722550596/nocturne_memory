@@ -9,7 +9,7 @@ single DatabaseManager instance.
 from typing import Optional, TYPE_CHECKING
 
 from .database import DatabaseManager
-from .snapshot import ChangesetStore, get_changeset_store
+from .snapshot import ChangesetStore, get_changeset_store, commit_checkpoint
 from .namespace import get_namespace, set_namespace
 from .models import (
     Base, ROOT_NODE_UUID, Node, Memory, Edge, Path,

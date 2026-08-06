@@ -83,7 +83,7 @@ async def test_review_existing_memory_consecutive_updates_are_modified_and_rollb
         when="When first reviewing",
         title="review_consecutive_update",
     )
-    assert "记住" in created
+    assert "记住" in getattr(created, "message", str(created))
 
     initial_groups = await api_client.get("/review/groups")
     assert initial_groups.status_code == 200
@@ -101,7 +101,7 @@ async def test_review_existing_memory_consecutive_updates_are_modified_and_rollb
         new_text="Middle version",
         when="When reviewing middle",
     )
-    assert "改好" in first
+    assert "改好" in getattr(first, "message", str(first))
 
     second = await mcp_module.edit_memory(
         "core://review_consecutive_update",
@@ -109,7 +109,7 @@ async def test_review_existing_memory_consecutive_updates_are_modified_and_rollb
         new_text="Final version",
         when="When reviewing final",
     )
-    assert "改好" in second
+    assert "改好" in getattr(second, "message", str(second))
 
     groups = await api_client.get("/review/groups")
     assert groups.status_code == 200
@@ -156,7 +156,7 @@ async def test_review_rollback_fails_if_previous_memory_version_was_purged(
         old_text="Rollback source version",
         new_text="Updated version",
     )
-    assert "改好" in updated
+    assert "改好" in getattr(updated, "message", str(updated))
 
     await graph_service.permanently_delete_memory(created["id"])
 

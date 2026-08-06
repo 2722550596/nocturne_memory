@@ -528,6 +528,28 @@ async def commit_revision(
     return rev.id
 
 
+async def commit_checkpoint(session) -> Optional[int]:
+    """快照当前未审核池为一个 revision 检查点（不清池，不动 approved）。
+
+    Returns the new revision_id or None (if pool is empty or unchanged).
+    """
+    import hashlib
+    store = get_changeset_store()
+    rows = store.load_all_changed_rows()
+    if not rows:
+        return None
+
+    # Deduplicate against the last checkpoint hash
+    pool_hash = hashlib.sha256(json.dumps(rows, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+    if getattr(store, "_last_checkpoint_hash", None) == pool_hash:
+        return None
+
+    parent_id = store.get_head_revision_id()
+    new_id = await commit_revision(session, parent_id, "", rows, author="ai", message="checkpoint")
+    store.set_head_revision_id(new_id)
+    store._last_checkpoint_hash = pool_hash
+    return new_id
+
 async def get_revision_tree(
     session,
     namespace: str = "",
