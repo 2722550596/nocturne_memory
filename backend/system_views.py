@@ -3,7 +3,7 @@ System view generators for special ``system://`` URIs.
 
 Each function produces a formatted text view from the memory graph
 (boot, index, recent, glossary, diagnostic).  They are called by
-``read_memory`` in ``mcp_server`` when a ``system://`` URI is requested.
+``browse_memory`` in ``mcp_server`` when a ``system://`` URI is requested.
 
 Imports from ``mcp_server`` (parse_uri, make_uri, config constants) are
 done inside function bodies to avoid circular imports at module level.
@@ -23,7 +23,7 @@ from datetime import date
 async def fetch_and_format_memory(uri: str, track_access: bool = False) -> str:
     """
     Fetch memory data and return a formatted string.
-    Used by read_memory tool and boot view.
+    Used by browse_memory tool and boot view.
     """
     from mcp_server import parse_uri, make_uri, DEFAULT_DOMAIN, get_config
     graph = get_graph_service()
@@ -732,7 +732,7 @@ async def generate_diagnostic_view(domain: str, days_stale: int = 30, max_childr
                 lines.extend([
                     "### 3.1 Orphaned Nodes",
                     "Nodes whose parent path no longer exists (broken path chain).",
-                    "Use `read_memory` with the URI to inspect, then `add_alias` to re-parent or `delete_memory` to remove.",
+                    "Use `browse_memory` with the URI to inspect, then `link_memory` to re-parent or `forget_memory` to remove."
                     ""
                 ])
                 for i, node in enumerate(orphaned_nodes, 1):
@@ -748,7 +748,7 @@ async def generate_diagnostic_view(domain: str, days_stale: int = 30, max_childr
                     "### 3.2 Duplicate Aliases under Same Parent",
                     "A single node has multiple alias paths under the same parent node.",
                     "Usually caused by accidentally inserting another alias when one already exists.",
-                    "Use `delete_memory` on the redundant alias URI to remove the extra path.",
+                    "Use `forget_memory` on the redundant alias URI to remove the extra path."
                     ""
                 ])
                 for i, item in enumerate(duplicate_aliases, 1):
