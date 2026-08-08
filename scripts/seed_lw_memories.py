@@ -22,7 +22,9 @@ from pathlib import Path
 BACKEND_DIR = Path(__file__).resolve().parent.parent / "backend"
 sys.path.insert(0, str(BACKEND_DIR))
 
-LW_ROOT = Path("/home/yoshix7ti/projects/worldlines-mvp/app/cores")
+# Default to sibling directory if WORLDLINES_ROOT is not set
+DEFAULT_LW_ROOT = Path(__file__).resolve().parent.parent.parent / "worldlines-mvp" / "app" / "cores"
+LW_ROOT = Path(os.environ.get("WORLDLINES_ROOT", DEFAULT_LW_ROOT))
 
 WORLDS = {
     "qian-mian-ji": LW_ROOT / "qian-mian-ji",
@@ -142,8 +144,6 @@ def build_world_content(world_dir: Path) -> dict:
 async def seed_world(world_name: str):
     """Seed all boot memories for a single world."""
     import config as _cfg
-    import importlib
-    importlib.reload(_cfg)
 
     from db import get_db_manager, get_graph_service
     from db.namespace import namespace_scope
@@ -151,9 +151,8 @@ async def seed_world(world_name: str):
     world_dir = WORLDS[world_name]
     config_path = CONFIGS_DIR / world_name / "config.json"
 
-    # Set --config via sys.argv so config.py picks it up
-    sys.argv = [sys.argv[0], "--config", str(config_path)]
-    importlib.reload(_cfg)
+    # Override config dynamically using the new API
+    _cfg.set_config_path(config_path)
     print(f"[{world_name}] CONFIG_PATH: {_cfg.CONFIG_PATH}")
 
     # Init DB

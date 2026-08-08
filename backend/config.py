@@ -34,17 +34,25 @@ CONFIG_PATH = ROOT_DIR / "config.json"
 
 def _parse_config_override() -> Optional[Path]:
     """从命令行 --config 参数解析 config.json 路径，支持每世界独立 DB。"""
-    for i, arg in enumerate(sys.argv):
-        if arg == "--config" and i + 1 < len(sys.argv):
-            return Path(sys.argv[i + 1]).resolve()
-        if arg.startswith("--config="):
-            return Path(arg[len("--config="):]).resolve()
+    import argparse
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--config", type=str, help="Path to config.json (e.g. for multi-world isolation)")
+    args, _ = parser.parse_known_args()
+    if args.config:
+        return Path(args.config).resolve()
     return None
 
 
 _CONFIG_OVERRIDE = _parse_config_override()
 if _CONFIG_OVERRIDE:
     CONFIG_PATH = _CONFIG_OVERRIDE
+
+
+def set_config_path(path: Path) -> None:
+    """Override the config path dynamically (e.g., for tests or seed scripts)."""
+    global CONFIG_PATH
+    CONFIG_PATH = path.resolve()
+    _invalidate()
 
 _DEMO_DB = "demo.db"
 _USER_DB = "nocturne_data.db"

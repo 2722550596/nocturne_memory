@@ -702,6 +702,7 @@ async def edit_memory(
     importance: Optional[int] = None,
     when: Optional[str] = None,
     time: Optional[str] = None,
+    character_id: str = "",
 ) -> ToolResult | UpdateResult:
     """修改一段记忆的内容。
 
@@ -747,108 +748,114 @@ async def edit_memory(
 
 
     try:
-        domain, path = parse_uri(uri)
-        full_uri = make_uri(domain, path)
+        async def _do():
+            domain, path = parse_uri(uri)
+            full_uri = make_uri(domain, path)
 
-        # ── 校验参数互斥 ──
-        modes = 0
-        if old_text is not None: modes += 1
-        if append is not None: modes += 1
-        if line is not None: modes += 1
-        if modes > 1:
-            return "不能同时使用多种编辑模式。请选一种：替换(old_text+new_text)、追加(append)、行编辑(line+line_content)。"
-        if old_text is not None and new_text is None:
-            return '替换模式需要 old_text 和 new_text 两个参数。要删除的话用 new_text=""。'
-        if line is not None and line_content is None and importance is None and when is None:
-            return "行编辑模式下需要提供 line_content（新内容）。"
-        if line_content is not None and line is None:
-            return "给了 line_content 但没给 line 行号。"
-        if old_text is None and append is None and line is None and importance is None and when is None and time is None:
-            return "没有要改的东西。至少提供一个编辑参数或修改时间/重要性/想起条件。"
+            # ── 校验参数互斥 ──
+            modes = 0
+            if old_text is not None: modes += 1
+            if append is not None: modes += 1
+            if line is not None: modes += 1
+            if modes > 1:
+                return "不能同时使用多种编辑模式。请选一种：替换(old_text+new_text)、追加(append)、行编辑(line+line_content)。"
+            if old_text is not None and new_text is None:
+                return '替换模式需要 old_text 和 new_text 两个参数。要删除的话用 new_text=""。'
+            if line is not None and line_content is None and importance is None and when is None:
+                return "行编辑模式下需要提供 line_content（新内容）。"
+            if line_content is not None and line is None:
+                return "给了 line_content 但没给 line 行号。"
+            if old_text is None and append is None and line is None and importance is None and when is None and time is None:
+                return "没有要改的东西。至少提供一个编辑参数或修改时间/重要性/想起条件。"
 
-        # ── 读取当前内容 ──
-        memory = await graph.get_memory_by_path(path, domain, namespace=get_namespace())
-        if not memory:
-            return ToolResult(message=f"没找到「{full_uri}」这条记忆。")
+            # ── 读取当前内容 ──
+            memory = await graph.get_memory_by_path(path, domain, namespace=get_namespace())
+            if not memory:
+                return ToolResult(message=f"没找到「{full_uri}」这条记忆。")
 
-        current_content = memory.get("content", "")
-        content = None
+            current_content = memory.get("content", "")
+            content = None
 
-        if old_text is not None:
-            # 替换模式
-            if old_text == new_text:
-                return "old_text 和 new_text 一模一样，没任何变化。"
+            if old_text is not None:
+                # 替换模式
+                if old_text == new_text:
+                    return "old_text 和 new_text 一模一样，没任何变化。"
 
-            count = current_content.count(old_text)
-            if count > 1:
-                return f"「{old_text}」在记忆里出现了 {count} 次，无法确定替换哪个。多写点上下文让它唯一。"
-            if count == 1:
-                content = current_content.replace(old_text, new_text, 1)
-            else:
-                # 尝试 \\n 规范化
-                norm_old = normalize_literal_newlines(old_text) if "\\n" in old_text else None
-                if norm_old is not None and norm_old != old_text:
-                    norm_count = current_content.count(norm_old)
-                    if norm_count == 1:
-                        norm_new = normalize_literal_newlines(new_text) if new_text and "\\n" in new_text else new_text
-                        content = current_content.replace(norm_old, norm_new, 1)
+                count = current_content.count(old_text)
+                if count > 1:
+                    return f"「{old_text}」在记忆里出现了 {count} 次，无法确定替换哪个。多写点上下文让它唯一。"
+                if count == 1:
+                    content = current_content.replace(old_text, new_text, 1)
+                else:
+                    # 尝试 \\n 规范化
+                    norm_old = normalize_literal_newlines(old_text) if "\\n" in old_text else None
+                    if norm_old is not None and norm_old != old_text:
+                        norm_count = current_content.count(norm_old)
+                        if norm_count == 1:
+                            norm_new = normalize_literal_newlines(new_text) if new_text and "\\n" in new_text else new_text
+                            content = current_content.replace(norm_old, norm_new, 1)
 
-                if content is None:
-                    # 尝试 Unicode 标准化匹配
-                    patched = try_normalized_patch(current_content, old_text, new_text)
-                    if patched is not None:
-                        content = patched
+                    if content is None:
+                        # 尝试 Unicode 标准化匹配
+                        patched = try_normalized_patch(current_content, old_text, new_text)
+                        if patched is not None:
+                            content = patched
 
-                if content is None:
-                    return f"在「{full_uri}」里没找到「{old_text}」。先 browse_memory 看看确切内容再试。"
+                    if content is None:
+                        return f"在「{full_uri}」里没找到「{old_text}」。先 browse_memory 看看确切内容再试。"
 
-            if content == current_content:
-                return "替换后内容和原来一模一样，没有变化。"
+                if content == current_content:
+                    return "替换后内容和原来一模一样，没有变化。"
 
-        elif append is not None:
-            # 追加模式
-            if not append:
-                return "追加的内容不能为空。"
-            content = current_content + append
+            elif append is not None:
+                # 追加模式
+                if not append:
+                    return "追加的内容不能为空。"
+                content = current_content + append
 
-        elif line is not None:
-            # 行编辑模式
-            lines = current_content.split("\n")
-            if line < 1 or line > len(lines):
-                return ToolResult(message=f"行号 {line} 超出范围。这个记忆一共有 {len(lines)} 行。")
-            lines[line - 1] = line_content
-            content = "\n".join(lines)
+            elif line is not None:
+                # 行编辑模式
+                lines = current_content.split("\n")
+                if line < 1 or line > len(lines):
+                    return ToolResult(message=f"行号 {line} 超出范围。这个记忆一共有 {len(lines)} 行。")
+                lines[line - 1] = line_content
+                content = "\n".join(lines)
 
-        result = await graph.update_memory(
-            path=path,
-            content=content,
-            priority=importance,
-            disclosure=when,
-            domain=domain,
-            namespace=get_namespace(),
-            world_timestamp=final_world_time,
-        )
+            result = await graph.update_memory(
+                path=path,
+                content=content,
+                priority=importance,
+                disclosure=when,
+                domain=domain,
+                namespace=get_namespace(),
+                world_timestamp=final_world_time,
+            )
 
-        _record_rows(
-            before_state=result.get("rows_before", {}),
-            after_state=result.get("rows_after", {}),
-        )
+            _record_rows(
+                before_state=result.get("rows_before", {}),
+                after_state=result.get("rows_after", {}),
+            )
 
-        db = get_db_manager()
-        async with db.session() as session:
-            rev_id = await commit_checkpoint(session)
+            db = get_db_manager()
+            async with db.session() as session:
+                rev_id = await commit_checkpoint(session)
 
-        msg = f"已经改好了：「{full_uri}」"
-        if final_world_time:
-            msg += f" (时间更新为: {final_world_time})"
-        return UpdateResult(
-            message=msg,
-            revision_id=rev_id,
-            node_uuid=result["node_uuid"],
-            uri=full_uri,
-            old_memory_id=result.get("old_memory_id"),
-            new_memory_id=result.get("new_memory_id"),
-        )
+            msg = f"已经改好了：「{full_uri}」"
+            if final_world_time:
+                msg += f" (时间更新为: {final_world_time})"
+            return UpdateResult(
+                message=msg,
+                revision_id=rev_id,
+                node_uuid=result["node_uuid"],
+                uri=full_uri,
+                old_memory_id=result.get("old_memory_id"),
+                new_memory_id=result.get("new_memory_id"),
+            )
+        
+        if character_id:
+            async with namespace_scope(character_id):
+                return await _do()
+        return await _do()
 
     except ValueError as e:
         return ToolResult(message=f"没改掉：{str(e)}")
@@ -859,7 +866,7 @@ async def edit_memory(
 # ── 删除 ──────────────────────────────────────────────────────────────────
 
 @write_tool()
-async def forget_memory(uri: str) -> ToolResult | ForgetResult:
+async def forget_memory(uri: str, character_id: str = "") -> ToolResult | ForgetResult:
     """忘掉一段记忆。删除前会自动备份到 staging/ 目录。
 
     删除的是这个 URI 路径下的记录。如果这个记忆还有其他入口
@@ -877,28 +884,34 @@ async def forget_memory(uri: str) -> ToolResult | ForgetResult:
     graph = get_graph_service()
 
     try:
-        domain, path = parse_uri(uri)
-        full_uri = make_uri(domain, path)
+        async def _do():
+            domain, path = parse_uri(uri)
+            full_uri = make_uri(domain, path)
 
-        memory = await graph.get_memory_by_path(path, domain, namespace=get_namespace())
-        if not memory:
-            return ToolResult(message=f"没找到「{full_uri}」这条记忆。")
+            memory = await graph.get_memory_by_path(path, domain, namespace=get_namespace())
+            if not memory:
+                return ToolResult(message=f"没找到「{full_uri}」这条记忆。")
 
-        result = await graph.remove_path(path, domain, namespace=get_namespace())
-        rows_before = result.get("rows_before", {})
+            result = await graph.remove_path(path, domain, namespace=get_namespace())
+            rows_before = result.get("rows_before", {})
 
-        _record_rows(
-            before_state=rows_before,
-            after_state={},
-        )
+            _record_rows(
+                before_state=rows_before,
+                after_state={},
+            )
 
-        deleted_path_count = len(rows_before.get("paths", []))
-        descendant_count = max(0, deleted_path_count - 1)
-        msg = f"忘掉了：「{full_uri}」"
-        if descendant_count > 0:
-            msg += f"（连带清掉了 {descendant_count} 个子节点）"
+            deleted_path_count = len(rows_before.get("paths", []))
+            descendant_count = max(0, deleted_path_count - 1)
+            msg = f"忘掉了：「{full_uri}」"
+            if descendant_count > 0:
+                msg += f"（连带清掉了 {descendant_count} 个子节点）"
 
-        return msg
+            return msg
+        
+        if character_id:
+            async with namespace_scope(character_id):
+                return await _do()
+        return await _do()
 
     except ValueError as e:
         return ToolResult(message=f"没忘掉：{str(e)}")
@@ -914,6 +927,7 @@ async def link_memory(
     new_uri: str,
     importance: int,
     when: str,
+    character_id: str = "",
 ) -> ToolResult | LinkResult:
     """同一条记忆多放一个入口。
 
@@ -939,37 +953,43 @@ async def link_memory(
     graph = get_graph_service()
 
     try:
-        new_domain, new_path = parse_uri(new_uri)
-        target_domain, target_path = parse_uri(target_uri)
+        async def _do():
+            new_domain, new_path = parse_uri(new_uri)
+            target_domain, target_path = parse_uri(target_uri)
 
-        result = await graph.add_path(
-            new_path=new_path,
-            target_path=target_path,
-            new_domain=new_domain,
-            target_domain=target_domain,
-            priority=importance,
-            disclosure=when,
-            namespace=get_namespace(),
-        )
+            result = await graph.add_path(
+                new_path=new_path,
+                target_path=target_path,
+                new_domain=new_domain,
+                target_domain=target_domain,
+                priority=importance,
+                disclosure=when,
+                namespace=get_namespace(),
+            )
 
-        _record_rows(
-            before_state={},
-            after_state=result.get("rows_after", {}),
-        )
+            _record_rows(
+                before_state={},
+                after_state=result.get("rows_after", {}),
+            )
 
-        alias_uri = result.get("new_uri", new_uri)
-        msg = f"在「{alias_uri}」也能想起「{target_uri}」了。"
+            alias_uri = result.get("new_uri", new_uri)
+            msg = f"在「{alias_uri}」也能想起「{target_uri}」了。"
 
-        db = get_db_manager()
-        async with db.session() as session:
-            rev_id = await commit_checkpoint(session)
+            db = get_db_manager()
+            async with db.session() as session:
+                rev_id = await commit_checkpoint(session)
 
-        return LinkResult(
-            message=msg,
-            revision_id=rev_id,
-            target_uri=target_uri,
-            new_uri=alias_uri,
-        )
+            return LinkResult(
+                message=msg,
+                revision_id=rev_id,
+                target_uri=target_uri,
+                new_uri=alias_uri,
+            )
+        
+        if character_id:
+            async with namespace_scope(character_id):
+                return await _do()
+        return await _do()
 
     except ValueError as e:
         return ToolResult(message=f"没加上：{str(e)}")
@@ -982,6 +1002,7 @@ async def tag_memory(
     uri: str,
     add: Optional[List[str]] = None,
     remove: Optional[List[str]] = None,
+    character_id: str = "",
 ) -> ToolResult | TagResult:
     """给一段记忆贴上触发词标签。
 
@@ -1010,89 +1031,95 @@ async def tag_memory(
     glossary = get_glossary_service()
 
     try:
-        domain, path = parse_uri(uri)
-        full_uri = make_uri(domain, path)
+        async def _do():
+            domain, path = parse_uri(uri)
+            full_uri = make_uri(domain, path)
 
-        memory = await graph.get_memory_by_path(path, domain, namespace=get_namespace())
-        if not memory:
-            return ToolResult(message=f"没找到「{full_uri}」。")
+            memory = await graph.get_memory_by_path(path, domain, namespace=get_namespace())
+            if not memory:
+                return ToolResult(message=f"没找到「{full_uri}」。")
 
-        node_uuid = memory["node_uuid"]
+            node_uuid = memory["node_uuid"]
 
-        if add and remove:
-            add_set = {k.strip() for k in add if k.strip()}
-            remove_set = {k.strip() for k in remove if k.strip()}
-            overlap = add_set.intersection(remove_set)
-            if overlap:
-                return f"不能同时添加和删除同一个词：{', '.join(sorted(overlap))}"
+            if add and remove:
+                add_set = {k.strip() for k in add if k.strip()}
+                remove_set = {k.strip() for k in remove if k.strip()}
+                overlap = add_set.intersection(remove_set)
+                if overlap:
+                    return f"不能同时添加和删除同一个词：{', '.join(sorted(overlap))}"
 
-        added = []
-        skipped_add = []
-        removed = []
-        skipped_remove = []
-        before_state = {"glossary_keywords": []}
-        after_state = {"glossary_keywords": []}
+            added = []
+            skipped_add = []
+            removed = []
+            skipped_remove = []
+            before_state = {"glossary_keywords": []}
+            after_state = {"glossary_keywords": []}
 
-        if add:
-            for kw in add:
-                kw = kw.strip()
-                if not kw:
-                    continue
-                try:
-                    result = await glossary.add_glossary_keyword(kw, node_uuid, namespace=get_namespace())
-                    added.append(kw)
-                    if "rows_before" in result:
-                        before_state["glossary_keywords"].extend(result["rows_before"].get("glossary_keywords", []))
-                    if "rows_after" in result:
-                        after_state["glossary_keywords"].extend(result["rows_after"].get("glossary_keywords", []))
-                except ValueError:
-                    skipped_add.append(kw)
+            if add:
+                for kw in add:
+                    kw = kw.strip()
+                    if not kw:
+                        continue
+                    try:
+                        result = await glossary.add_glossary_keyword(kw, node_uuid, namespace=get_namespace())
+                        added.append(kw)
+                        if "rows_before" in result:
+                            before_state["glossary_keywords"].extend(result["rows_before"].get("glossary_keywords", []))
+                        if "rows_after" in result:
+                            after_state["glossary_keywords"].extend(result["rows_after"].get("glossary_keywords", []))
+                    except ValueError:
+                        skipped_add.append(kw)
 
-        if remove:
-            for kw in remove:
-                kw = kw.strip()
-                if not kw:
-                    continue
-                result = await glossary.remove_glossary_keyword(kw, node_uuid, namespace=get_namespace())
-                if result.get("success"):
-                    removed.append(kw)
-                    if "rows_before" in result:
-                        before_state["glossary_keywords"].extend(result["rows_before"].get("glossary_keywords", []))
-                    if "rows_after" in result:
-                        after_state["glossary_keywords"].extend(result["rows_after"].get("glossary_keywords", []))
-                else:
-                    skipped_remove.append(kw)
+            if remove:
+                for kw in remove:
+                    kw = kw.strip()
+                    if not kw:
+                        continue
+                    result = await glossary.remove_glossary_keyword(kw, node_uuid, namespace=get_namespace())
+                    if result.get("success"):
+                        removed.append(kw)
+                        if "rows_before" in result:
+                            before_state["glossary_keywords"].extend(result["rows_before"].get("glossary_keywords", []))
+                        if "rows_after" in result:
+                            after_state["glossary_keywords"].extend(result["rows_after"].get("glossary_keywords", []))
+                    else:
+                        skipped_remove.append(kw)
 
-        if added or removed:
-            get_changeset_store().record_many(before_state, after_state)
+            if added or removed:
+                get_changeset_store().record_many(before_state, after_state)
 
-        current = await glossary.get_glossary_for_node(node_uuid, namespace=get_namespace())
+            current = await glossary.get_glossary_for_node(node_uuid, namespace=get_namespace())
 
-        lines = [f"「{full_uri}」的标签："]
-        if added:
-            lines.append(f"  加上了：{', '.join(added)}")
-        if skipped_add:
-            lines.append(f"  已经有了（跳过）：{', '.join(skipped_add)}")
-        if removed:
-            lines.append(f"  删掉了：{', '.join(removed)}")
-        if skipped_remove:
-            lines.append(f"  本来就没有（跳过）：{', '.join(skipped_remove)}")
-        if current:
-            lines.append(f"  现在是：{', '.join(current)}")
-        else:
-            lines.append("  现在没有标签。")
+            lines = [f"「{full_uri}」的标签："]
+            if added:
+                lines.append(f"  加上了：{', '.join(added)}")
+            if skipped_add:
+                lines.append(f"  已经有了（跳过）：{', '.join(skipped_add)}")
+            if removed:
+                lines.append(f"  删掉了：{', '.join(removed)}")
+            if skipped_remove:
+                lines.append(f"  本来就没有（跳过）：{', '.join(skipped_remove)}")
+            if current:
+                lines.append(f"  现在是：{', '.join(current)}")
+            else:
+                lines.append("  现在没有标签。")
 
-        db = get_db_manager()
-        async with db.session() as session:
-            rev_id = await commit_checkpoint(session)
+            db = get_db_manager()
+            async with db.session() as session:
+                rev_id = await commit_checkpoint(session)
 
-        return TagResult(
-            message="\n".join(lines),
-            revision_id=rev_id,
-            node_uuid=node_uuid,
-            added=added,
-            removed=removed,
-        )
+            return TagResult(
+                message="\n".join(lines),
+                revision_id=rev_id,
+                node_uuid=node_uuid,
+                added=added,
+                removed=removed,
+            )
+        
+        if character_id:
+            async with namespace_scope(character_id):
+                return await _do()
+        return await _do()
 
     except ValueError as e:
         return f"标签没改：{str(e)}"
@@ -1108,6 +1135,7 @@ async def merge_memories(
     target_uri: str,
     content: str,
     reason: Optional[str] = None,
+    character_id: str = "",
 ) -> ToolResult | CreateResult:
     """把多条记忆合并成一条。
 
@@ -1134,88 +1162,94 @@ async def merge_memories(
     glossary = get_glossary_service()
 
     try:
-        if len(uris) < 2:
-            return ToolResult(message="至少需要两条记忆才能合并。")
+        async def _do():
+            if len(uris) < 2:
+                return ToolResult(message="至少需要两条记忆才能合并。")
 
-        target_domain, target_path = parse_uri(target_uri)
-        namespace = get_namespace()
+            target_domain, target_path = parse_uri(target_uri)
+            namespace = get_namespace()
 
-        # 1. 读取所有源记忆
-        sources = []
-        source_glossary_keywords = []
-        for uri in uris:
-            domain, path = parse_uri(uri)
-            memory = await graph.get_memory_by_path(path, domain, namespace=namespace)
-            if not memory:
-                return ToolResult(message=f"没找到源记忆「{uri}」。")
-            sources.append((domain, path, memory))
-            # 收集标签
-            node_glossary = await glossary.get_glossary_for_node(memory["node_uuid"], namespace=namespace)
-            source_glossary_keywords.extend(node_glossary)
+            # 1. 读取所有源记忆
+            sources = []
+            source_glossary_keywords = []
+            for uri in uris:
+                domain, path = parse_uri(uri)
+                memory = await graph.get_memory_by_path(path, domain, namespace=namespace)
+                if not memory:
+                    return ToolResult(message=f"没找到源记忆「{uri}」。")
+                sources.append((domain, path, memory))
+                # 收集标签
+                node_glossary = await glossary.get_glossary_for_node(memory["node_uuid"], namespace=namespace)
+                source_glossary_keywords.extend(node_glossary)
 
-        # 2. 创建目标记忆
-        parent_path = "/".join(target_path.split("/")[:-1])
-        title_part = target_path.split("/")[-1]
+            # 2. 创建目标记忆
+            parent_path = "/".join(target_path.split("/")[:-1])
+            title_part = target_path.split("/")[-1]
 
-        result = await graph.create_memory(
-            parent_path=parent_path,
-            content=content,
-            priority=3,
-            title=title_part,
-            disclosure="当需要回想合并后的事时",
-            domain=target_domain,
-            namespace=namespace,
-        )
+            result = await graph.create_memory(
+                parent_path=parent_path,
+                content=content,
+                priority=3,
+                title=title_part,
+                disclosure="当需要回想合并后的事时",
+                domain=target_domain,
+                namespace=namespace,
+            )
 
-        target_node_uuid = result.get("node_uuid")
-        created_uri = result.get("uri", make_uri(target_domain, result["path"]))
+            target_node_uuid = result.get("node_uuid")
+            created_uri = result.get("uri", make_uri(target_domain, result["path"]))
 
-        # 3. 转移标签到目标节点
-        if target_node_uuid and source_glossary_keywords:
-            added_keywords = set()
-            for kw in source_glossary_keywords:
-                if kw not in added_keywords:
-                    try:
-                        await glossary.add_glossary_keyword(kw, target_node_uuid, namespace=namespace)
-                        added_keywords.add(kw)
-                    except ValueError:
-                        pass
+            # 3. 转移标签到目标节点
+            if target_node_uuid and source_glossary_keywords:
+                added_keywords = set()
+                for kw in source_glossary_keywords:
+                    if kw not in added_keywords:
+                        try:
+                            await glossary.add_glossary_keyword(kw, target_node_uuid, namespace=namespace)
+                            added_keywords.add(kw)
+                        except ValueError:
+                            pass
 
-        # 4. 删除源记忆（逐条删除）
-        deleted_sources = []
-        for domain, path, memory in sources:
-            full_uri = make_uri(domain, path)
-            try:
-                await graph.remove_path(path, domain, namespace=namespace)
-                deleted_sources.append(full_uri)
-            except Exception as e:
-                # 单条删除失败不阻断整体流程
-                pass
+            # 4. 删除源记忆（逐条删除）
+            deleted_sources = []
+            for domain, path, memory in sources:
+                full_uri = make_uri(domain, path)
+                try:
+                    await graph.remove_path(path, domain, namespace=namespace)
+                    deleted_sources.append(full_uri)
+                except Exception as e:
+                    # 单条删除失败不阻断整体流程
+                    pass
 
-        _record_rows(
-            before_state=result.get("rows_before", {}),
-            after_state=result.get("rows_after", {}),
-        )
+            _record_rows(
+                before_state=result.get("rows_before", {}),
+                after_state=result.get("rows_after", {}),
+            )
 
-        msg = f"合并完成：{len(uris)} 条记忆 → 「{created_uri}」"
-        if reason:
-            msg += f"\n原因：{reason}"
-        if deleted_sources:
-            msg += f"\n已删除旧入口：{len(deleted_sources)} 条"
-        if source_glossary_keywords:
-            transferred = len(set(source_glossary_keywords))
-            msg += f"\n转移了 {transferred} 个标签到新记忆"
+            msg = f"合并完成：{len(uris)} 条记忆 → 「{created_uri}」"
+            if reason:
+                msg += f"\n原因：{reason}"
+            if deleted_sources:
+                msg += f"\n已删除旧入口：{len(deleted_sources)} 条"
+            if source_glossary_keywords:
+                transferred = len(set(source_glossary_keywords))
+                msg += f"\n转移了 {transferred} 个标签到新记忆"
 
-        db = get_db_manager()
-        async with db.session() as session:
-            rev_id = await commit_checkpoint(session)
+            db = get_db_manager()
+            async with db.session() as session:
+                rev_id = await commit_checkpoint(session)
 
-        return CreateResult(
-            message=msg,
-            revision_id=rev_id,
-            node_uuid=target_node_uuid or "",
-            uri=created_uri,
-        )
+            return CreateResult(
+                message=msg,
+                revision_id=rev_id,
+                node_uuid=target_node_uuid or "",
+                uri=created_uri,
+            )
+        
+        if character_id:
+            async with namespace_scope(character_id):
+                return await _do()
+        return await _do()
 
     except ValueError as e:
         return f"合并没成功：{str(e)}"
@@ -1232,6 +1266,7 @@ async def organize_memory(
     importance: int = 3,
     when: Optional[str] = None,
     tags: Optional[List[str]] = None,
+    character_id: str = "",
 ) -> ToolResult | CreateResult:
     """把几段相关的记忆整理成一个主题。
 
@@ -1258,94 +1293,100 @@ async def organize_memory(
     glossary = get_glossary_service()
 
     try:
-        if not source_uris:
-            return ToolResult(message="至少需要一条源记忆来整理。")
+        async def _do():
+            if not source_uris:
+                return ToolResult(message="至少需要一条源记忆来整理。")
 
-        if mode not in ("move", "link", "keep"):
-            return ToolResult(message="mode 必须是 move、link 或 keep。")
+            if mode not in ("move", "link", "keep"):
+                return ToolResult(message="mode 必须是 move、link 或 keep。")
 
-        target_domain, target_path = parse_uri(target_uri)
-        namespace = get_namespace()
+            target_domain, target_path = parse_uri(target_uri)
+            namespace = get_namespace()
 
-        # 确定主题的父路径和标题
-        parent_path = "/".join(target_path.split("/")[:-1]) if "/" in target_path else ""
-        title_part = target_path.split("/")[-1]
+            # 确定主题的父路径和标题
+            parent_path = "/".join(target_path.split("/")[:-1]) if "/" in target_path else ""
+            title_part = target_path.split("/")[-1]
 
-        # 1. 创建主题总结节点
-        result = await graph.create_memory(
-            parent_path=parent_path,
-            content=content,
-            priority=importance,
-            title=title_part,
-            disclosure=when or f"当说到{title_part}时",
-            domain=target_domain,
-            namespace=namespace,
-        )
+            # 1. 创建主题总结节点
+            result = await graph.create_memory(
+                parent_path=parent_path,
+                content=content,
+                priority=importance,
+                title=title_part,
+                disclosure=when or f"当说到{title_part}时",
+                domain=target_domain,
+                namespace=namespace,
+            )
 
-        target_node_uuid = result.get("node_uuid")
-        topic_uri = result.get("uri", make_uri(target_domain, result["path"]))
+            target_node_uuid = result.get("node_uuid")
+            topic_uri = result.get("uri", make_uri(target_domain, result["path"]))
 
-        # 2. 给主题加标签
-        if tags and target_node_uuid:
-            for kw in tags:
-                kw = kw.strip()
-                if kw:
-                    try:
-                        await glossary.add_glossary_keyword(kw, target_node_uuid, namespace=namespace)
-                    except ValueError:
-                        pass
+            # 2. 给主题加标签
+            if tags and target_node_uuid:
+                for kw in tags:
+                    kw = kw.strip()
+                    if kw:
+                        try:
+                            await glossary.add_glossary_keyword(kw, target_node_uuid, namespace=namespace)
+                        except ValueError:
+                            pass
 
-        # 3. 处理源记忆
-        linked = 0
-        moved = 0
-        for src_uri in source_uris:
-            src_domain, src_path = parse_uri(src_uri)
-            src_basename = src_path.split("/")[-1]
-            # 源记忆成为主题的子节点
-            child_path = f"{target_path}/{src_basename}"
+            # 3. 处理源记忆
+            linked = 0
+            moved = 0
+            for src_uri in source_uris:
+                src_domain, src_path = parse_uri(src_uri)
+                src_basename = src_path.split("/")[-1]
+                # 源记忆成为主题的子节点
+                child_path = f"{target_path}/{src_basename}"
 
-            try:
-                await graph.add_path(
-                    new_path=child_path,
-                    target_path=src_path,
-                    new_domain=target_domain,
-                    target_domain=src_domain,
-                    priority=importance + 1,
-                    disclosure=when or f"当说起{src_basename}时",
-                    namespace=namespace,
-                )
-                linked += 1
+                try:
+                    await graph.add_path(
+                        new_path=child_path,
+                        target_path=src_path,
+                        new_domain=target_domain,
+                        target_domain=src_domain,
+                        priority=importance + 1,
+                        disclosure=when or f"当说起{src_basename}时",
+                        namespace=namespace,
+                    )
+                    linked += 1
 
-                if mode == "move":
-                    await graph.remove_path(src_path, src_domain, namespace=namespace)
-                    moved += 1
+                    if mode == "move":
+                        await graph.remove_path(src_path, src_domain, namespace=namespace)
+                        moved += 1
 
-            except Exception:
-                pass
+                except Exception:
+                    pass
 
-        _record_rows(
-            before_state={},
-            after_state=result.get("rows_after", {}),
-        )
+            _record_rows(
+                before_state={},
+                after_state=result.get("rows_after", {}),
+            )
 
-        msg_parts = [f"整理好了：「{topic_uri}」"]
-        if linked:
-            msg_parts.append(f"  关联了 {linked} 条记忆到主题下")
-        if moved:
-            msg_parts.append(f"  移除了 {moved} 个旧入口")
-        if tags:
-            msg_parts.append(f"  标签：{', '.join(tags)}")
+            msg_parts = [f"整理好了：「{topic_uri}」"]
+            if linked:
+                msg_parts.append(f"  关联了 {linked} 条记忆到主题下")
+            if moved:
+                msg_parts.append(f"  移除了 {moved} 个旧入口")
+            if tags:
+                msg_parts.append(f"  标签：{', '.join(tags)}")
 
-        db = get_db_manager()
-        async with db.session() as session:
-            rev_id = await commit_checkpoint(session)
+            db = get_db_manager()
+            async with db.session() as session:
+                rev_id = await commit_checkpoint(session)
 
-        return CreateResult(
-            message="\n".join(msg_parts),
-            revision_id=rev_id,
-            node_uuid=target_node_uuid or "",
-            uri=topic_uri,
-        )
+            return CreateResult(
+                message="\n".join(msg_parts),
+                revision_id=rev_id,
+                node_uuid=target_node_uuid or "",
+                uri=topic_uri,
+            )
+        
+        if character_id:
+            async with namespace_scope(character_id):
+                return await _do()
+        return await _do()
 
     except ValueError as e:
         return ToolResult(message=f"没整理好：{str(e)}")
@@ -1362,6 +1403,7 @@ async def archive_memory(
     mode: str = "char",
     raw: Optional[str] = None,
     time: Optional[str] = None,
+    character_id: str = "",
 ) -> ToolResult | ArchiveResult:
     """把刚才发生的事存档到历史记录里。
 
@@ -1379,65 +1421,71 @@ async def archive_memory(
     graph = get_graph_service()
 
     try:
-        import re
-        namespace = get_namespace()
+        async def _do():
+            import re
+            namespace = get_namespace()
 
-        if not history.strip():
-            return ToolResult(message="history 不能为空。写一下刚才发生了什么。")
+            if not history.strip():
+                return ToolResult(message="history 不能为空。写一下刚才发生了什么。")
             
-        if not title or not re.match(r"^[a-zA-Z0-9_-]+$", title):
-            return ToolResult(message="title 必须提供，且只能包含字母、数字、连字符和下划线（如 'first_encounter'）。")
+            if not title or not re.match(r"^[a-zA-Z0-9_-]+$", title):
+                return ToolResult(message="title 必须提供，且只能包含字母、数字、连字符和下划线（如 'first_encounter'）。")
 
-        # --- 世界时间处理 ---
-        config = get_config()
-        clock = config.get("world_clock", {})
-        current_world_time = clock.get("current_time")
+            # --- 世界时间处理 ---
+            config = get_config()
+            clock = config.get("world_clock", {})
+            current_world_time = clock.get("current_time")
 
-        final_world_time = None
-        if time:
-            from system_views import parse_relative_offset
-            offset_date = parse_relative_offset(time, current_world_time)
-            final_world_time = offset_date or time
-        elif current_world_time:
-            final_world_time = current_world_time
+            final_world_time = None
+            if time:
+                from system_views import parse_relative_offset
+                offset_date = parse_relative_offset(time, current_world_time)
+                final_world_time = offset_date or time
+            elif current_world_time:
+                final_world_time = current_world_time
 
-        # 写入 history 域（统一放在 scenes/ 目录下保持整洁）
-        await graph.create_memory(
-            parent_path="scenes",
-            content=history,
-            priority=5,
-            title=title,
-            disclosure="当回顾最近经历时",
-            domain="history",
-            namespace=namespace,
-            world_timestamp=final_world_time, 
-        )
-
-        if raw and raw.strip():
+            # 写入 history 域（统一放在 scenes/ 目录下保持整洁）
             await graph.create_memory(
                 parent_path="scenes",
-                content=raw,
+                content=history,
                 priority=5,
-                title=f"{title}_raw",
-                disclosure="",
-                domain="history_raw",
+                title=title,
+                disclosure="当回顾最近经历时",
+                domain="history",
                 namespace=namespace,
                 world_timestamp=final_world_time, 
             )
 
-        msg = f"场景已存档（{mode}）：history://scenes/{title}"
-        if final_world_time:
-            msg += f" (世界时间: {final_world_time})"
-            
-        db = get_db_manager()
-        async with db.session() as session:
-            rev_id = await commit_checkpoint(session)
+            if raw and raw.strip():
+                await graph.create_memory(
+                    parent_path="scenes",
+                    content=raw,
+                    priority=5,
+                    title=f"{title}_raw",
+                    disclosure="",
+                    domain="history_raw",
+                    namespace=namespace,
+                    world_timestamp=final_world_time, 
+                )
 
-        return ArchiveResult(
-            message=msg,
-            revision_id=rev_id,
-            uri=f"history://scenes/{title}",
-        )
+            msg = f"场景已存档（{mode}）：history://scenes/{title}"
+            if final_world_time:
+                msg += f" (世界时间: {final_world_time})"
+            
+            db = get_db_manager()
+            async with db.session() as session:
+                rev_id = await commit_checkpoint(session)
+
+            return ArchiveResult(
+                message=msg,
+                revision_id=rev_id,
+                uri=f"history://scenes/{title}",
+            )
+        
+        if character_id:
+            async with namespace_scope(character_id):
+                return await _do()
+        return await _do()
 
     except ValueError as e:
         return f"存档失败：{str(e)}"
@@ -1447,7 +1495,7 @@ async def archive_memory(
 # ── 回顾 ──────────────────────────────────────────────────────────────────
 
 @mcp.tool()
-async def recent_memories(limit: int = 10, domain: Optional[str] = None, character_id: str = "") -> str:
+async def recent_memories(limit: int = 10, character_id: str = "") -> str:
     """看看最近发生了什么--最近改过的记忆。
 
     列出最近新增或修改的记忆，按时间倒序。
@@ -1455,13 +1503,11 @@ async def recent_memories(limit: int = 10, domain: Optional[str] = None, charact
 
     Args:
         limit: 最多显示多少条（默认 10，最多 50）
-        domain: 可选，只看某个域名的（如 "core"）
         character_id: 你的角色 ID（用于记忆隔离），如 "player"/"elena"/"world"。留空用默认 namespace。
 
     Examples:
         recent_memories()           # 最近 10 条
         recent_memories(20)          # 最近 20 条
-        recent_memories(domain="core")  # 只看核心记忆
     """
     try:
         if character_id:
@@ -1476,6 +1522,7 @@ async def recent_memories(limit: int = 10, domain: Optional[str] = None, charact
 async def boot_memory(
     action: str,
     uris: Optional[List[str]] = None,
+    character_id: str = "",
 ) -> str:
     """管理「醒来记忆」——你醒来时最先想起的事。
 
@@ -1501,59 +1548,65 @@ async def boot_memory(
     preset = get_preset_service()
 
     try:
-        namespace = get_namespace()
+        async def _do():
+            namespace = get_namespace()
 
-        if action == "list":
-            current = await preset.get_boot_uris(namespace=namespace)
-            if not current:
-                return "现在没有设置醒来记忆。用 boot_memory('add', [...]) 来设置。"
-            lines = [f"醒来时会想起 {len(current)} 件事：", ""]
-            for i, uri in enumerate(current, 1):
-                lines.append(f"{i}. {uri}")
-            # 读取内容预览
-            graph = get_graph_service()
-            for i, uri in enumerate(current, 1):
-                try:
-                    domain, path = parse_uri(uri)
-                    memory = await graph.get_memory_by_path(path, domain, namespace=namespace)
-                    if memory and memory.get("content"):
-                        snippet = memory["content"].strip()[:100].replace("\n", " ")
-                        lines.append(f"   → {snippet}…" if len(memory["content"]) > 100 else f"   → {snippet}")
-                except Exception:
-                    pass
-            return "\n".join(lines)
+            if action == "list":
+                current = await preset.get_boot_uris(namespace=namespace)
+                if not current:
+                    return "现在没有设置醒来记忆。用 boot_memory('add', [...]) 来设置。"
+                lines = [f"醒来时会想起 {len(current)} 件事：", ""]
+                for i, uri in enumerate(current, 1):
+                    lines.append(f"{i}. {uri}")
+                # 读取内容预览
+                graph = get_graph_service()
+                for i, uri in enumerate(current, 1):
+                    try:
+                        domain, path = parse_uri(uri)
+                        memory = await graph.get_memory_by_path(path, domain, namespace=namespace)
+                        if memory and memory.get("content"):
+                            snippet = memory["content"].strip()[:100].replace("\n", " ")
+                            lines.append(f"   → {snippet}…" if len(memory["content"]) > 100 else f"   → {snippet}")
+                    except Exception:
+                        pass
+                return "\n".join(lines)
 
-        elif action == "set":
-            if not uris:
-                return "set 操作需要提供 uris 列表。"
-            await preset.set_boot_uris(namespace=namespace, uris=uris)
-            return f"醒来记忆已设为 {len(uris)} 条。"
+            elif action == "set":
+                if not uris:
+                    return "set 操作需要提供 uris 列表。"
+                await preset.set_boot_uris(namespace=namespace, uris=uris)
+                return f"醒来记忆已设为 {len(uris)} 条。"
 
-        elif action == "add":
-            if not uris:
-                return "add 操作需要提供 uris 列表。"
-            current = await preset.get_boot_uris(namespace=namespace)
-            existing = set(current)
-            added = [u for u in uris if u not in existing]
-            if not added:
-                return "这些 URI 已经在醒来记忆里了。"
-            current.extend(added)
-            await preset.set_boot_uris(namespace=namespace, uris=current)
-            return f"加上了 {len(added)} 条醒来记忆。"
+            elif action == "add":
+                if not uris:
+                    return "add 操作需要提供 uris 列表。"
+                current = await preset.get_boot_uris(namespace=namespace)
+                existing = set(current)
+                added = [u for u in uris if u not in existing]
+                if not added:
+                    return "这些 URI 已经在醒来记忆里了。"
+                current.extend(added)
+                await preset.set_boot_uris(namespace=namespace, uris=current)
+                return f"加上了 {len(added)} 条醒来记忆。"
 
-        elif action == "remove":
-            if not uris:
-                return "remove 操作需要提供 uris 列表。"
-            current = await preset.get_boot_uris(namespace=namespace)
-            remove_set = set(uris)
-            remaining = [u for u in current if u not in remove_set]
-            if len(remaining) == len(current):
-                return "这些 URI 不在醒来记忆列表里。"
-            await preset.set_boot_uris(namespace=namespace, uris=remaining)
-            return f"移除了 {len(current) - len(remaining)} 条醒来记忆。"
+            elif action == "remove":
+                if not uris:
+                    return "remove 操作需要提供 uris 列表。"
+                current = await preset.get_boot_uris(namespace=namespace)
+                remove_set = set(uris)
+                remaining = [u for u in current if u not in remove_set]
+                if len(remaining) == len(current):
+                    return "这些 URI 不在醒来记忆列表里。"
+                await preset.set_boot_uris(namespace=namespace, uris=remaining)
+                return f"移除了 {len(current) - len(remaining)} 条醒来记忆。"
 
-        else:
-            return "action 必须是 list、set、add 或 remove。"
+            else:
+                return "action 必须是 list、set、add 或 remove。"
+        
+        if character_id:
+            async with namespace_scope(character_id):
+                return await _do()
+        return await _do()
 
     except ValueError as e:
         return f"没改掉：{str(e)}"
