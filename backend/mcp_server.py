@@ -511,36 +511,42 @@ async def remember_memory(uri: str, content: str, time: Optional[str] = None, ch
         character_id: 你的角色 ID（用于记忆隔离），如 "player"/"elena"/"world"。留空用默认 namespace。
     """
     try:
-        # Split URI into domain, parent_path, and title
-        domain, full_path = parse_uri(uri)
-        if "/" in full_path:
-            parent_path, title = full_path.rsplit("/", 1)
-        else:
-            parent_path = ""
-            title = full_path
+        async def _do():
+            # Split URI into domain, parent_path, and title
+            domain, full_path = parse_uri(uri)
+            if "/" in full_path:
+                parent_path, title = full_path.rsplit("/", 1)
+            else:
+                parent_path = ""
+                title = full_path
 
-        # Handle world time parsing
-        final_world_time = None
-        config = get_config()
-        clock = config.get("world_clock", {})
-        current_world_time = clock.get("current_time")
+            # Handle world time parsing
+            final_world_time = None
+            config = get_config()
+            clock = config.get("world_clock", {})
+            current_world_time = clock.get("current_time")
 
-        if time:
-            from system_views import parse_relative_offset
-            # Try parsing as offset first
-            offset_date = parse_relative_offset(time, current_world_time)
-            final_world_time = offset_date or time
-        elif clock.get("auto_timestamp") and current_world_time:
-            final_world_time = current_world_time
+            if time:
+                from system_views import parse_relative_offset
+                # Try parsing as offset first
+                offset_date = parse_relative_offset(time, current_world_time)
+                final_world_time = offset_date or time
+            elif clock.get("auto_timestamp") and current_world_time:
+                final_world_time = current_world_time
 
-        graph = get_graph_service()
-        await graph.create_memory(
-            parent_path, content, priority=5, title=title, domain=domain, 
-            namespace=character_id or get_namespace(),
-            world_timestamp=final_world_time
-        )
-        
-        return f"已记下记忆: {uri}" + (f" (发生于 {final_world_time})" if final_world_time else "")
+            graph = get_graph_service()
+            await graph.create_memory(
+                parent_path, content, priority=5, title=title, domain=domain,
+                namespace=get_namespace(),
+                world_timestamp=final_world_time
+            )
+
+            return f"已记下记忆: {uri}" + (f" (发生于 {final_world_time})" if final_world_time else "")
+
+        if character_id:
+            async with namespace_scope(character_id):
+                return await _do()
+        return await _do()
     except Exception as e:
         return f"记录失败: {str(e)}"
 
@@ -619,57 +625,63 @@ async def remember_child_memory(
             if not re.match(r"^[a-zA-Z0-9_-]+$", title):
                 return ToolResult(message="标题只能包含字母、数字、连字符和下划线（不能有空格、斜杠、特殊字符）。")
 
-        domain, parent_path = parse_uri(parent_uri)
+        async def _do():
+            domain, parent_path = parse_uri(parent_uri)
 
-        # --- 时间解析与隐式继承逻辑 ---
-        final_world_time = None
-        config = get_config()
-        clock = config.get("world_clock", {})
-        current_world_time = clock.get("current_time")
+            # --- 时间解析与隐式继承逻辑 ---
+            final_world_time = None
+            config = get_config()
+            clock = config.get("world_clock", {})
+            current_world_time = clock.get("current_time")
 
-        if time:
-            from system_views import parse_relative_offset
-            offset_date = parse_relative_offset(time, current_world_time)
-            final_world_time = offset_date or time
-        else:
-            # 优先尝试从父节点继承世界时间
-            parent_mem = await graph.get_memory_by_path(parent_path, domain, namespace=character_id or get_namespace())
-            if parent_mem and parent_mem.get("world_timestamp"):
-                final_world_time = parent_mem.get("world_timestamp")
-            elif clock.get("auto_timestamp") and current_world_time:
-                # 回退到全局当前时间
-                final_world_time = current_world_time
+            if time:
+                from system_views import parse_relative_offset
+                offset_date = parse_relative_offset(time, current_world_time)
+                final_world_time = offset_date or time
+            else:
+                # 优先尝试从父节点继承世界时间
+                parent_mem = await graph.get_memory_by_path(parent_path, domain, namespace=get_namespace())
+                if parent_mem and parent_mem.get("world_timestamp"):
+                    final_world_time = parent_mem.get("world_timestamp")
+                elif clock.get("auto_timestamp") and current_world_time:
+                    # 回退到全局当前时间
+                    final_world_time = current_world_time
 
-        result = await graph.create_memory(
-            parent_path=parent_path,
-            content=content,
-            priority=importance,
-            title=title,
-            disclosure=when,
-            domain=domain,
-            namespace=character_id or get_namespace(),
-            world_timestamp=final_world_time, # 注入时间
-        )
+            result = await graph.create_memory(
+                parent_path=parent_path,
+                content=content,
+                priority=importance,
+                title=title,
+                disclosure=when,
+                domain=domain,
+                namespace=get_namespace(),
+                world_timestamp=final_world_time, # 注入时间
+            )
 
-        created_uri = result.get("uri", make_uri(domain, result["path"]))
-        _record_rows(before_state={}, after_state=result.get("rows_after", {}))
+            created_uri = result.get("uri", make_uri(domain, result["path"]))
+            _record_rows(before_state={}, after_state=result.get("rows_after", {}))
 
-        db = get_db_manager()
-        async with db.session() as session:
-            rev_id = await commit_checkpoint(session)
+            db = get_db_manager()
+            async with db.session() as session:
+                rev_id = await commit_checkpoint(session)
 
-        msg = f"记住了：「{created_uri}」"
-        if final_world_time:
-            msg += f" (发生于 {final_world_time})"
-            
-        if result.get("path"):
-            msg += f"\n\n新记的事已经放好了。你看看和它相关的其他记忆有没有什么要整理的？"
-        return CreateResult(
-            message=msg,
-            revision_id=rev_id,
-            node_uuid=result["node_uuid"],
-            uri=created_uri,
-        )
+            msg = f"记住了：「{created_uri}」"
+            if final_world_time:
+                msg += f" (发生于 {final_world_time})"
+
+            if result.get("path"):
+                msg += f"\n\n新记的事已经放好了。你看看和它相关的其他记忆有没有什么要整理的？"
+            return CreateResult(
+                message=msg,
+                revision_id=rev_id,
+                node_uuid=result["node_uuid"],
+                uri=created_uri,
+            )
+
+        if character_id:
+            async with namespace_scope(character_id):
+                return await _do()
+        return await _do()
 
     except ValueError as e:
         return ToolResult(message=f"没记住：{str(e)}")

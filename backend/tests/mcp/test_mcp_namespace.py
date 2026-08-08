@@ -480,3 +480,69 @@ async def test_default_namespace_mcp_full_flow(mcp_env):
 
     # Parent still alive
     assert "Updated default agent" in await browse_memory("core://agent")
+
+
+# ====================================================================
+# 9. character_id per-call write isolation (namespace_scope routing)
+# ====================================================================
+
+@pytest.mark.asyncio
+async def test_character_id_write_isolation(mcp_env):
+    """remember_memory / remember_child_memory route writes to the
+    character_id namespace via namespace_scope, fully isolated from other
+    namespaces and the process default."""
+    from mcp_server import remember_memory, remember_child_memory, browse_memory
+    from db.namespace import set_namespace
+
+    # Process default is the empty namespace; character_id must override it.
+    set_namespace("")
+
+    # --- remember_memory writes to the character_id namespace ---
+    msg = await remember_memory(
+        "core://test_iso", "hello from player", character_id="player"
+    )
+    assert "已记下记忆" in msg
+
+    # elena namespace cannot see it
+    elena_view = await browse_memory("core://test_iso", character_id="elena")
+    assert "hello from player" not in elena_view
+
+    # process default (empty) cannot see it either
+    default_view = await browse_memory("core://test_iso")
+    assert "hello from player" not in default_view
+
+    # player namespace can see it
+    player_view = await browse_memory("core://test_iso", character_id="player")
+    assert "hello from player" in player_view
+
+    # --- remember_child_memory writes to the character_id namespace ---
+    child_result = await remember_child_memory(
+        "core://test_iso", "player child memory",
+        when="When reviewing isolation test child", title="iso_child",
+        character_id="player",
+    )
+    assert "core://test_iso/iso_child" in getattr(child_result, "message", str(child_result))
+
+    # elena namespace cannot see the child
+    elena_child = await browse_memory("core://test_iso/iso_child", character_id="elena")
+    assert "player child memory" not in elena_child
+
+    # player namespace can see the child
+    player_child = await browse_memory("core://test_iso/iso_child", character_id="player")
+    assert "player child memory" in player_child
+
+    # --- cross-write: elena gets her own independent memory at the same URI ---
+    elena_msg = await remember_memory(
+        "core://test_iso", "hello from elena", character_id="elena"
+    )
+    assert "已记下记忆" in elena_msg
+
+    # player still sees only its own content
+    player_view2 = await browse_memory("core://test_iso", character_id="player")
+    assert "hello from player" in player_view2
+    assert "hello from elena" not in player_view2
+
+    # elena sees only its own content
+    elena_view2 = await browse_memory("core://test_iso", character_id="elena")
+    assert "hello from elena" in elena_view2
+    assert "hello from player" not in elena_view2
