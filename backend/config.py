@@ -31,6 +31,21 @@ _IN_DOCKER = Path("/.dockerenv").exists()
 ROOT_DIR = _BACKEND_DIR if _IN_DOCKER else _BACKEND_DIR.parent
 CONFIG_PATH = ROOT_DIR / "config.json"
 
+
+def _parse_config_override() -> Optional[Path]:
+    """从命令行 --config 参数解析 config.json 路径，支持每世界独立 DB。"""
+    for i, arg in enumerate(sys.argv):
+        if arg == "--config" and i + 1 < len(sys.argv):
+            return Path(sys.argv[i + 1]).resolve()
+        if arg.startswith("--config="):
+            return Path(arg[len("--config="):]).resolve()
+    return None
+
+
+_CONFIG_OVERRIDE = _parse_config_override()
+if _CONFIG_OVERRIDE:
+    CONFIG_PATH = _CONFIG_OVERRIDE
+
 _DEMO_DB = "demo.db"
 _USER_DB = "nocturne_data.db"
 
@@ -81,6 +96,7 @@ def _docker_setup_hint() -> str:
 
 def _save_file(cfg: dict) -> None:
     try:
+        CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
         with open(CONFIG_PATH, "w", encoding="utf-8") as f:
             json.dump(cfg, f, indent=2, ensure_ascii=False)
             f.write("\n")

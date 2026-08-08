@@ -33,7 +33,7 @@ from db import (
     get_db_manager, get_graph_service, get_glossary_service,
     get_search_indexer, close_db, get_preset_service,
 )
-from db.namespace import get_namespace
+from db.namespace import get_namespace, namespace_scope
 from db.snapshot import get_changeset_store, commit_checkpoint
 from models.mcp_results import (
     ToolResult, CreateResult, UpdateResult, ForgetResult,
@@ -364,13 +364,15 @@ def _resolve_parent_children(graph, uri: str, namespace: str) -> Tuple[str, str]
 # ── 查看 ──────────────────────────────────────────────────────────────────
 
 @mcp.tool()
-async def browse_memory(uri: str) -> str:
+async def browse_memory(uri: str, character_id: str = "") -> str:
     """查看一段记忆的内容。
 
     这是你回想起某件事的主要方式。输入 URI 就能看到那里的内容，包括子节点和相关的触发词关联。
 
     Args:
         uri: 记忆的 URI，例如 core://identity/habits
+        character_id: 你的角色 ID（用于记忆隔离），如 "player"/"elena"/"world"。
+                      留空则使用进程默认 namespace。
 
         特殊系统视图（不需要记忆也看得到）：
         - system://boot        : 醒来时最先看到的记忆
@@ -381,51 +383,56 @@ async def browse_memory(uri: str) -> str:
     try:
         stripped = uri.strip()
 
-        # ── System URI handling ────────────────────────────────────────────
-        if stripped.startswith("system://"):
-            parts = stripped[len("system://"):].split("/")
-            cmd = parts[0].lower() if parts else ""
+        async def _do():
+            # ── System URI handling ────────────────────────────────────────
+            if stripped.startswith("system://"):
+                parts = stripped[len("system://"):].split("/")
+                cmd = parts[0].lower() if parts else ""
 
-            if cmd == "boot":
-                preset = get_preset_service()
-                boot_uris = await preset.get_boot_uris(namespace=get_namespace())
-                return await generate_boot_memory_view(boot_uris)
+                if cmd == "boot":
+                    preset = get_preset_service()
+                    boot_uris = await preset.get_boot_uris(namespace=get_namespace())
+                    return await generate_boot_memory_view(boot_uris)
 
-            elif cmd == "wakeup":
-                preset = get_preset_service()
-                boot_uris = await preset.get_boot_uris(namespace=get_namespace())
-                history_limit = int(parts[1]) if len(parts) > 1 and parts[1] else 5
-                return await generate_wakeup_view(boot_uris, history_limit)
+                elif cmd == "wakeup":
+                    preset = get_preset_service()
+                    boot_uris = await preset.get_boot_uris(namespace=get_namespace())
+                    history_limit = int(parts[1]) if len(parts) > 1 and parts[1] else 5
+                    return await generate_wakeup_view(boot_uris, history_limit)
 
-            elif cmd == "memory-slot":
-                slot_type = parts[1] if len(parts) > 1 else ""
-                preset = get_preset_service()
-                boot_uris = await preset.get_boot_uris(namespace=get_namespace())
-                from system_views import generate_memory_slot_view
-                return await generate_memory_slot_view(slot_type, boot_uris)
+                elif cmd == "memory-slot":
+                    slot_type = parts[1] if len(parts) > 1 else ""
+                    preset = get_preset_service()
+                    boot_uris = await preset.get_boot_uris(namespace=get_namespace())
+                    from system_views import generate_memory_slot_view
+                    return await generate_memory_slot_view(slot_type, boot_uris)
 
-            elif cmd == "index":
-                domain_filter = parts[1] if len(parts) > 1 else None
-                return await generate_memory_index_view(domain_filter)
+                elif cmd == "index":
+                    domain_filter = parts[1] if len(parts) > 1 else None
+                    return await generate_memory_index_view(domain_filter)
 
-            elif cmd == "recent":
-                limit = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 10
-                return await generate_recent_memories_view(limit)
+                elif cmd == "recent":
+                    limit = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 10
+                    return await generate_recent_memories_view(limit)
 
-            elif cmd == "glossary":
-                return await generate_glossary_index_view()
+                elif cmd == "glossary":
+                    return await generate_glossary_index_view()
 
-            elif cmd == "diagnostic":
-                domain = parts[1] if len(parts) > 1 else DEFAULT_DOMAIN
-                days = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 30
-                return await generate_diagnostic_view(domain, days)
+                elif cmd == "diagnostic":
+                    domain = parts[1] if len(parts) > 1 else DEFAULT_DOMAIN
+                    days = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 30
+                    return await generate_diagnostic_view(domain, days)
 
-            else:
-                return f"未知的系统视图：{stripped}。试试 system://boot, system://wakeup, system://index/<domain>, system://recent/<N>, system://glossary, system://diagnostic/<domain>"
+                else:
+                    return f"未知的系统视图：{stripped}。试试 system://boot, system://wakeup, system://index/<domain>, system://recent/<N>, system://glossary, system://diagnostic/<domain>"
 
-        # ── Normal memory lookup ───────────────────────────────────────────
-        return await fetch_and_format_memory(stripped, track_access=True)
+            # ── Normal memory lookup ───────────────────────────────────────
+            return await fetch_and_format_memory(stripped, track_access=True)
 
+        if character_id:
+            async with namespace_scope(character_id):
+                return await _do()
+        return await _do()
     except ValueError as e:
         return f"出错了：{str(e)}"
     except Exception as e:
@@ -433,7 +440,7 @@ async def browse_memory(uri: str) -> str:
 
 
 @mcp.tool()
-async def search_memory(query: str, domain: Optional[str] = None, limit: int = 10, sort_by_world: bool = False) -> str:
+async def search_memory(query: str, domain: Optional[str] = None, limit: int = 10, sort_by_world: bool = False, character_id: str = "") -> str:
     """搜索记忆。想不起 URI 的时候用这个来找。
 
     这是全文搜索，不是语义搜索。输入关键词就能找到相关记忆。
@@ -443,6 +450,7 @@ async def search_memory(query: str, domain: Optional[str] = None, limit: int = 1
         domain: 可选，限定在某个域名下搜索（如 "core"、"history"）
         limit: 最多返回多少条（默认 10）
         sort_by_world: 是否按世界时间排序（默认按现实时间）
+        character_id: 你的角色 ID（用于记忆隔离），如 "player"/"elena"/"world"。留空用默认 namespace。
     """
     graph = get_graph_service()
 
@@ -452,9 +460,16 @@ async def search_memory(query: str, domain: Optional[str] = None, limit: int = 1
         if domain is not None and domain not in valid:
             return f"没有 '{domain}' 这个域名。可用的：{', '.join(valid)}"
 
-        results = await graph.search_memories(
-            query, domain, limit=limit, namespace=get_namespace()
-        )
+        async def _search():
+            return await graph.search_memories(
+                query, domain, limit=limit, namespace=get_namespace()
+            )
+
+        if character_id:
+            async with namespace_scope(character_id):
+                results = await _search()
+        else:
+            results = await _search()
 
         if sort_by_world:
             # Standardize dates for sorting, treat None as earliest
@@ -482,7 +497,7 @@ async def search_memory(query: str, domain: Optional[str] = None, limit: int = 1
 
 
 @mcp.tool()
-async def remember_memory(uri: str, content: str, time: Optional[str] = None) -> str:
+async def remember_memory(uri: str, content: str, time: Optional[str] = None, character_id: str = "") -> str:
     """记下一段新的记忆。
 
     Args:
@@ -493,6 +508,7 @@ async def remember_memory(uri: str, content: str, time: Optional[str] = None) ->
               【何时使用时间？】
               - Events：需要时间线追踪的具体事件必须写明时间。例如某次相遇、交流（如 core://events/first_impression）。
               - Static：背景故事、性格习惯、世界观规则、常识（如 core://identity, core://world, core://relationships）。这类信息是永久有效的，无需传入时间。
+        character_id: 你的角色 ID（用于记忆隔离），如 "player"/"elena"/"world"。留空用默认 namespace。
     """
     try:
         # Split URI into domain, parent_path, and title
@@ -520,7 +536,7 @@ async def remember_memory(uri: str, content: str, time: Optional[str] = None) ->
         graph = get_graph_service()
         await graph.create_memory(
             parent_path, content, priority=5, title=title, domain=domain, 
-            namespace=get_namespace(),
+            namespace=character_id or get_namespace(),
             world_timestamp=final_world_time
         )
         
@@ -561,6 +577,7 @@ async def remember_child_memory(
     when: str = "", 
     title: Optional[str] = None,
     time: Optional[str] = None,
+    character_id: str = "",
 ) -> ToolResult | CreateResult:
     """
     把一段新的记忆放在某个已有的父节点下。父节点通常是你自然
@@ -587,6 +604,7 @@ async def remember_child_memory(
                 只能用字母、数字、连字符和下划线。
         time: 可选。事件发生的世界时间（YYYY-MM-DD 或相对位移如 "-1d"）。
               如果没有提供，系统会优先尝试继承父节点的世界时间。
+        character_id: 你的角色 ID（用于记忆隔离），如 "player"/"elena"/"world"。留空用默认 namespace。
 
     Returns:
         新建记忆的 URI
@@ -615,7 +633,7 @@ async def remember_child_memory(
             final_world_time = offset_date or time
         else:
             # 优先尝试从父节点继承世界时间
-            parent_mem = await graph.get_memory_by_path(parent_path, domain, namespace=get_namespace())
+            parent_mem = await graph.get_memory_by_path(parent_path, domain, namespace=character_id or get_namespace())
             if parent_mem and parent_mem.get("world_timestamp"):
                 final_world_time = parent_mem.get("world_timestamp")
             elif clock.get("auto_timestamp") and current_world_time:
@@ -629,7 +647,7 @@ async def remember_child_memory(
             title=title,
             disclosure=when,
             domain=domain,
-            namespace=get_namespace(),
+            namespace=character_id or get_namespace(),
             world_timestamp=final_world_time, # 注入时间
         )
 
@@ -1417,8 +1435,8 @@ async def archive_memory(
 # ── 回顾 ──────────────────────────────────────────────────────────────────
 
 @mcp.tool()
-async def recent_memories(limit: int = 10, domain: Optional[str] = None) -> str:
-    """看看最近发生了什么——最近改过的记忆。
+async def recent_memories(limit: int = 10, domain: Optional[str] = None, character_id: str = "") -> str:
+    """看看最近发生了什么--最近改过的记忆。
 
     列出最近新增或修改的记忆，按时间倒序。
     可以用来快速回顾最近你在想什么、记了什么。
@@ -1426,6 +1444,7 @@ async def recent_memories(limit: int = 10, domain: Optional[str] = None) -> str:
     Args:
         limit: 最多显示多少条（默认 10，最多 50）
         domain: 可选，只看某个域名的（如 "core"）
+        character_id: 你的角色 ID（用于记忆隔离），如 "player"/"elena"/"world"。留空用默认 namespace。
 
     Examples:
         recent_memories()           # 最近 10 条
@@ -1433,6 +1452,9 @@ async def recent_memories(limit: int = 10, domain: Optional[str] = None) -> str:
         recent_memories(domain="core")  # 只看核心记忆
     """
     try:
+        if character_id:
+            async with namespace_scope(character_id):
+                return await generate_recent_memories_view(limit)
         return await generate_recent_memories_view(limit)
     except Exception as e:
         return f"获取最近记忆失败：{str(e)}"

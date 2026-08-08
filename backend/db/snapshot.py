@@ -22,8 +22,21 @@ def _default_snapshot_dir() -> str:
     if env_dir:
         return env_dir
 
-    # Local layout: <repo>/backend/db/snapshot.py -> snapshots under <repo>/snapshots
-    # Docker layout: /app/db/snapshot.py -> snapshots under /app/snapshots
+    # Per-world snapshot dir: derive from the active config's database_url
+    # so each world DB gets its own changeset.json (avoids cross-DB
+    # head_revision_id mismatches when --config selects a different DB).
+    try:
+        import config as _cfg
+        url = _cfg.get("database_url") or ""
+        prefix = "sqlite+aiosqlite:///"
+        if url.startswith(prefix) and len(url) > len(prefix):
+            db_path = Path(url[len(prefix):])
+            return str(db_path.parent / "snapshots")
+    except Exception:
+        pass
+
+    # Fallback: Local layout <repo>/backend/db/snapshot.py -> <repo>/snapshots
+    # Docker layout: /app/db/snapshot.py -> /app/snapshots
     db_dir = Path(__file__).resolve().parent
     app_root = db_dir.parent.parent
     if app_root.name == "backend":
