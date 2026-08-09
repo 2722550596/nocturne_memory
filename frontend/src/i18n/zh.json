@@ -90,8 +90,8 @@
       "connected_saved": "已连接并保存。重启服务器后生效。",
       "created_switch": "已创建。点击「测试并保存」即可切换到此数据库。",
       "create_new_label": "创建新数据库",
-      "create_new_desc": "输入文件路径。文件和父文件夹将被自动创建。",
-      "new_db_placeholder": "C:/Users/me/data/new_memory.db",
+      "create_new_desc": "输入文件路径（绝对路径或相对文件名）。相对路径将自动放入 data/ 目录。文件和父文件夹将被自动创建。",
+      "new_db_placeholder": "my_memory.db（或完整路径）",
       "creating": "创建中...",
       "create": "创建"
     },
@@ -177,6 +177,8 @@
       "token_required": "必填：远程模式下未设置令牌则服务器拒绝启动。",
       "readonly_label": "只读 MCP 模式",
       "readonly_desc": "启用后，MCP 工具仅允许读取操作。适用于公开部署。",
+      "skip_backup_label": "跳过迁移自动备份",
+      "skip_backup_desc": "启用后，数据库迁移前不再创建 .bak 备份文件。审查/回退系统仍会保护数据变更。适用于备份文件堆积影响工作区整洁的场景。",
       "restart_warning": "点击保存后，需要重启服务器进程才能生效。",
       "saving": "保存中...",
       "save": "保存"

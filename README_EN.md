@@ -747,10 +747,12 @@ When you update Nocturne Memory to a new version via `git pull`, the database sc
 **You don't need to do anything manually.** Migrations run automatically when the MCP server starts:
 
 1. When an MCP client (Cursor, Claude, etc.) connects to Nocturne Memory, the system automatically detects any pending migration scripts.
-2. **For SQLite users**, the system automatically backs up your database file **before** applying migrations (e.g., `your_db.db.20260303_143000.bak`).
+2. **For SQLite users**, the system automatically backs up your database file **before** applying migrations (e.g., `your_db.db.20260303_143000.bak`). **Newly created empty databases skip this backup automatically** (no data to protect).
 3. A confirmation message is logged once all migrations complete.
 
 > Backup files are saved in the same directory as your database file. If anything goes wrong, you can rename the `.bak` file back to the original filename to restore.
+>
+> 💡 If you find the auto-backup redundant (the database already supports review/rollback), you can enable "Skip Migration Auto-Backup" in Dashboard **Settings -> Developer Mode / Advanced**, or set `"skip_migration_backup": true` in `config.json`. This only skips the pre-migration file backup; the review/rollback system still protects data changes.
 
 <details>
 <summary><strong>🔄 Migrating from Pre-1.0 (Neo4j) to v1.0 (SQLite)</strong></summary>

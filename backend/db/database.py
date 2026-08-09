@@ -141,10 +141,13 @@ class DatabaseManager:
 
             async with self.engine.begin() as conn:
                 is_initialized = await conn.run_sync(check_initialized)
-                if not is_initialized:
+                fresh_db = not is_initialized
+                if fresh_db:
                     await conn.run_sync(Base.metadata.create_all)
 
-            await run_migrations(self.engine)
+            # When the DB was just created by create_all, there is no user data
+            # to protect - skip the redundant pre-migration backup.
+            await run_migrations(self.engine, skip_for_fresh_db=fresh_db)
         except Exception as e:
             db_url = self.database_url
             

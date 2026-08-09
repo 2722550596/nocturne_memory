@@ -31,6 +31,7 @@ class SettingsUpdate(BaseModel):
     api_token: str | None = None
     cors_origins: str | None = None
     public_readonly_mcp: bool | None = None
+    skip_migration_backup: bool | None = None
     locale: str | None = None
     world_clock: dict | None = None
 
@@ -266,6 +267,23 @@ async def database_status():
     return info
 
 
+
+
+def _resolve_db_path(raw: str) -> Path:
+    """Resolve a user-supplied SQLite path.
+
+    Absolute paths are used as-is.  Relative paths (a bare filename like
+    ``my_memory.db`` or ``sub/file.db``) are placed under the project's
+    ``data/`` directory so the project root stays clean.
+    """
+    p = Path(raw).expanduser()
+    if not p.is_absolute():
+        data_dir = Path(config.ROOT_DIR) / "data"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        p = data_dir / p
+    return p.resolve()
+
+
 _ALLOWED_DB_SCHEMES = ("sqlite+aiosqlite", "postgresql+asyncpg")
 
 
@@ -295,7 +313,7 @@ async def test_database(body: DatabaseTest):
 @router.post("/database/create")
 async def create_database(body: DatabaseCreate):
     """Create a new empty SQLite database at the given path."""
-    db_path = Path(body.path).resolve()
+    db_path = _resolve_db_path(body.path)
 
     if db_path.exists():
         raise HTTPException(status_code=409, detail=t("api.settings.file_exists"))
@@ -325,7 +343,7 @@ async def switch_database(body: DatabaseCreate):
     Creates the file and parent directories if they don't exist,
     then reconnects and runs migrations. Existing connections are closed.
     """
-    db_path = Path(body.path).resolve()
+    db_path = _resolve_db_path(body.path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
     url = f"sqlite+aiosqlite:///{db_path.as_posix()}"
     config.set_value("database_url", url)

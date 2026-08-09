@@ -9,20 +9,21 @@ export default function AdvancedSection({ settings, lockedFields = [], onSave })
   const [host, setHost] = useState('127.0.0.1');
   const [token, setToken] = useState('');
   const [readonlyMcp, setReadonlyMcp] = useState(false);
+  const [skipBackup, setSkipBackup] = useState(false);
   const [showToken, setShowToken] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     if (settings?.host != null) setHost(settings.host);
-    if (settings?.api_token != null) setToken(settings.api_token);
     if (settings?.public_readonly_mcp != null) setReadonlyMcp(settings.public_readonly_mcp);
-  }, [settings?.host, settings?.api_token, settings?.public_readonly_mcp]);
+    if (settings?.skip_migration_backup != null) setSkipBackup(settings.skip_migration_backup);
+  }, [settings?.host, settings?.api_token, settings?.public_readonly_mcp, settings?.skip_migration_backup]);
 
   const handleSave = async () => {
     setSaving(true);
     try {
-      const updates = { public_readonly_mcp: readonlyMcp };
+      const updates = { public_readonly_mcp: readonlyMcp, skip_migration_backup: skipBackup };
       if (!isLocked('host')) updates.host = host.trim();
       if (token.trim()) updates.api_token = token.trim();
       await onSave(updates);
@@ -138,6 +139,23 @@ export default function AdvancedSection({ settings, lockedFields = [], onSave })
           <div>
             <span className="text-sm text-slate-300 block font-medium">{t('settings.advanced.readonly_label')}</span>
             <span className="text-xs text-slate-500 block">{t('settings.advanced.readonly_desc')}</span>
+          </div>
+        </div>
+      </div>
+      <div className="border-t border-slate-800/50 pt-4">
+        <div className="flex items-center gap-3">
+          <label className="relative inline-flex items-center cursor-pointer">
+            <input
+              type="checkbox"
+              checked={skipBackup}
+              onChange={e => { setSkipBackup(e.target.checked); setDirty(true); }}
+              className="sr-only peer"
+            />
+            <div className="w-9 h-5 bg-slate-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-slate-400 after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-amber-600 peer-checked:after:bg-white"></div>
+          </label>
+          <div>
+            <span className="text-sm text-slate-300 block font-medium">{t('settings.advanced.skip_backup_label')}</span>
+            <span className="text-xs text-slate-500 block">{t('settings.advanced.skip_backup_desc')}</span>
           </div>
         </div>
       </div>

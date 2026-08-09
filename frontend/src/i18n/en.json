@@ -94,8 +94,8 @@
       "connected_saved": "Connected and saved. Restart server to apply.",
       "created_switch": "Created. Click 'Test & Save' to switch to this database.",
       "create_new_label": "Create New Database",
-      "create_new_desc": "Enter a file path. The file and parent folder will be created automatically.",
-      "new_db_placeholder": "C:/Users/me/data/new_memory.db",
+      "create_new_desc": "Enter a file path (absolute or relative filename). Relative paths are placed under the data/ directory automatically. The file and parent folder will be created.",
+      "new_db_placeholder": "my_memory.db (or full path)",
       "creating": "Creating...",
       "create": "Create"
     },
@@ -181,6 +181,8 @@
       "token_required": "Required: server will refuse to start without a token in remote mode.",
       "readonly_label": "Read-only MCP Mode",
       "readonly_desc": "When enabled, MCP tools only allow read operations. Suitable for public deployments.",
+      "skip_backup_label": "Skip Migration Auto-Backup",
+      "skip_backup_desc": "When enabled, no .bak file is created before database migrations. The review/rollback system still protects data changes. Useful when backups clutter your workspace.",
       "restart_warning": "Server restart required for changes to take effect.",
       "saving": "Saving...",
       "save": "Save"

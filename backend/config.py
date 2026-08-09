@@ -73,6 +73,7 @@ DEFAULTS: dict[str, Any] = {
     "api_token": None,
     "cors_origins": None,
     "public_readonly_mcp": False,
+    "skip_migration_backup": False,
     "locale": None,
 }
 
@@ -83,8 +84,8 @@ _ENV_MAP: dict[str, str] = {
     "web_port": "WEB_PORT",
     "auto_open_browser": "AUTO_OPEN_BROWSER",
     "api_token": "API_TOKEN",
-    "cors_origins": "CORS_ORIGINS",
     "public_readonly_mcp": "PUBLIC_READONLY_MCP",
+    "skip_migration_backup": "SKIP_MIGRATION_BACKUP",
     "locale": "LOCALE",
 }
 
@@ -124,7 +125,7 @@ def _coerce(key: str, raw: str) -> Any:
         return [d.strip() for d in raw.split(",") if d.strip()]
     if key == "web_port":
         return int(raw)
-    if key in ("auto_open_browser", "public_readonly_mcp"):
+    if key in ("auto_open_browser", "public_readonly_mcp", "skip_migration_backup"):
         return raw.lower() not in ("false", "0", "no")
     return raw
 
@@ -322,6 +323,10 @@ def get(key: str) -> Any:
     """
     val = _load().get(key, DEFAULTS.get(key))
     if key == "database_url" and isinstance(val, str):
+        if "$(NOCTURNE_DATA_DIR)" in val:
+            data_dir = os.environ.get("NOCTURNE_DATA_DIR") or ""
+            if data_dir:
+                val = val.replace("$(NOCTURNE_DATA_DIR)", data_dir)
         if "$(NOCTURNE_ROOT)" in val:
             nocturne_root = os.environ.get("NOCTURNE_ROOT") or str(ROOT_DIR)
             val = val.replace("$(NOCTURNE_ROOT)", nocturne_root)
