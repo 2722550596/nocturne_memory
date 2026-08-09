@@ -314,8 +314,25 @@ def _invalidate():
 # ---------------------------------------------------------------------------
 
 def get(key: str) -> Any:
-    """Get a config value. Reads only from config.json."""
-    return _load().get(key, DEFAULTS.get(key))
+    """Get a config value. Reads only from config.json.
+    
+    If key is "database_url" and the value contains "$(NOCTURNE_ROOT)",
+    the placeholder is replaced with the NOCTURNE_ROOT environment variable
+    (or falls back to the parent of the backend directory).
+    """
+    val = _load().get(key, DEFAULTS.get(key))
+    if key == "database_url" and isinstance(val, str):
+        if "$(NOCTURNE_ROOT)" in val:
+            nocturne_root = os.environ.get("NOCTURNE_ROOT") or str(ROOT_DIR)
+            val = val.replace("$(NOCTURNE_ROOT)", nocturne_root)
+        
+        # Dynamic isolation per Run (for Worldlines)
+        run_id = os.environ.get("LW_RUN_ID")
+        if run_id:
+            # Change <slug>.db to <slug>_run-<run_id>.db
+            val = val.replace(".db", f"_run-{run_id}.db")
+            
+    return val
 
 
 def get_locale() -> str:
