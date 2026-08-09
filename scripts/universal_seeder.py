@@ -36,7 +36,12 @@ def parse_md(md_path: Path):
 async def seed_world(world_name: str):
     world_dir = LW_ROOT / world_name
     manifest_path = world_dir / "memory_manifest.yaml"
-    config_path = CONFIGS_DIR / world_name / "config.json"
+    # Prefer NOCTURNE_DATA_DIR (project-local data) over legacy CONFIGS_DIR
+    _data_dir = os.environ.get("NOCTURNE_DATA_DIR")
+    if _data_dir:
+        config_path = Path(_data_dir) / world_name / "config.json"
+    else:
+        config_path = CONFIGS_DIR / world_name / "config.json"
     
     if not manifest_path.exists():
         print(f"[{world_name}] No memory_manifest.yaml found.")
