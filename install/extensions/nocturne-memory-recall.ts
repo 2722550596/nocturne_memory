@@ -13,7 +13,6 @@ const PI_AGENT_DIR = "{{PI_AGENT_DIR}}";
 const DB_PATH = join(MEMORY_DIR, "data", "nocturne_data_fc852c.db");
 const CONFIG_PATH = join(MEMORY_DIR, "config.json");
 
-// Embedding API (reused from omp mnemopi config)
 // Embedding API. The key MUST come from the environment (NOCTURNE_EMBEDDING_API_KEY) —
 // this repo is public, never hardcode credentials. When the key is missing,
 // embed() returns null and recall degrades to keyword-only mode.
@@ -32,7 +31,10 @@ const MAX_SUMMARY_LEN = 80;
 
 // BAAI/bge-large-zh-v1.5 max sequence is 512 tokens; ~1 zh char per token.
 // Truncate embedding inputs so long memories don't 400 the whole batch.
+// Long memories are chunked (see chunkText) with this overlap to keep
+// sentence-level semantics intact across segment boundaries.
 const EMBED_INPUT_MAX = 500;
+const EMBED_CHUNK_OVERLAP = 80;
 
 // Scoring weights (aligned with omp mnemopi hybrid recall)
 const W_VECTOR = 0.5;
@@ -112,6 +114,20 @@ function firstLineSummary(content: string): string {
 	return first.length > MAX_SUMMARY_LEN ? `${first.slice(0, MAX_SUMMARY_LEN)}……` : first;
 }
 
+// Chunk text into overlapping segments of EMBED_INPUT_MAX chars. Overlap keeps
+// semantic units (sentences) intact across chunk boundaries. Returns [""] for
+// empty input so callers always get >=1 segment.
+function chunkText(text: string, maxLen: number, overlap: number): string[] {
+	if (text.length === 0) return [""];
+	if (text.length <= maxLen) return [text];
+	const chunks: string[] = [];
+	const step = maxLen - overlap;
+	for (let start = 0; start < text.length; start += step) {
+		chunks.push(text.slice(start, start + maxLen));
+	}
+	return chunks;
+}
+
 function nowMs(): number {
 	return Date.now();
 }
@@ -187,14 +203,38 @@ class VectorCache {
 		this.db = new DatabaseSync(CACHE_PATH);
 		this.db.exec(`
 			CREATE TABLE IF NOT EXISTS embeddings (
-				uri TEXT PRIMARY KEY,
+				uri TEXT NOT NULL,
+				seg_index INTEGER NOT NULL,
 				content_hash TEXT NOT NULL,
 				vector TEXT NOT NULL,
 				priority INTEGER NOT NULL DEFAULT 0,
 				world_timestamp TEXT,
-				updated_at INTEGER NOT NULL
+				updated_at INTEGER NOT NULL,
+				PRIMARY KEY (uri, seg_index)
 			)
 		`);
+		// Schema migration: the pre-chunking layout had a single vector per
+		// uri (no seg_index). The cache is a pure acceleration layer - drop and
+		// rebuild when the shape doesn't match, so stale rows never poison
+		// segment lookups.
+		const cols = this.db.prepare("PRAGMA table_info(embeddings)").all() as unknown as Array<{
+			name: string;
+		}>;
+		if (!cols.some((c) => c.name === "seg_index")) {
+			this.db.exec("DROP TABLE embeddings");
+			this.db.exec(`
+				CREATE TABLE embeddings (
+					uri TEXT NOT NULL,
+					seg_index INTEGER NOT NULL,
+					content_hash TEXT NOT NULL,
+					vector TEXT NOT NULL,
+					priority INTEGER NOT NULL DEFAULT 0,
+					world_timestamp TEXT,
+					updated_at INTEGER NOT NULL,
+					PRIMARY KEY (uri, seg_index)
+				)
+			`);
+		}
 	}
 
 	private get _db(): DatabaseSync {
@@ -202,22 +242,28 @@ class VectorCache {
 		return this.db!;
 	}
 
-	/** Load cached vectors for unchanged docs. Returns {uri -> vector}. */
-	loadValid(namespace: string, docs: SearchDoc[]): Map<string, Float32Array> {
-		const map = new Map<string, Float32Array>();
+	/** Load cached segment vectors for unchanged docs. Returns {uri -> segments[]}. */
+	loadValid(namespace: string, docs: SearchDoc[]): Map<string, Float32Array[]> {
+		const map = new Map<string, Float32Array[]>();
 		try {
 			const rows = this._db
-				.prepare("SELECT uri, content_hash, vector FROM embeddings")
-				.all() as unknown as Array<{ uri: string; content_hash: string; vector: string }>;
-			const byUri = new Map(rows.map((r) => [r.uri, r]));
+				.prepare("SELECT uri, seg_index, content_hash, vector FROM embeddings ORDER BY uri, seg_index")
+				.all() as unknown as Array<{
+				uri: string;
+				seg_index: number;
+				content_hash: string;
+				vector: string;
+			}>;
 			const docHashes = new Map(docs.map((d) => [d.uri, md5(`${d.content}|${d.searchTerms}`)]));
-			for (const [uri, row] of byUri) {
-				const hash = docHashes.get(uri);
-				if (hash && hash === row.content_hash) {
-					try {
-						map.set(uri, Float32Array.from(JSON.parse(row.vector) as number[]));
-					} catch {}
-				}
+			for (const row of rows) {
+				const hash = docHashes.get(row.uri);
+				if (!hash || hash !== row.content_hash) continue; // stale version
+				try {
+					const v = Float32Array.from(JSON.parse(row.vector) as number[]);
+					const list = map.get(row.uri);
+					if (list) list[row.seg_index] = v;
+					else map.set(row.uri, [v]);
+				} catch {}
 			}
 			return map;
 		} catch {
@@ -225,26 +271,35 @@ class VectorCache {
 		}
 	}
 
-	/** Persist vectors for docs (upsert). */
-	save(docs: SearchDoc[], vectors: Float32Array[], namespace: string): void {
+	/**
+	 * Persist segment vectors for docs. `segments` maps uri -> segment texts,
+	 * `vectors` parallel to the flattened segment list.
+	 */
+	save(docs: SearchDoc[], segments: Map<string, string[]>, vectors: Float32Array[]): void {
 		if (!this.db) return;
 		const stmt = this._db.prepare(
-			`INSERT INTO embeddings (uri, content_hash, vector, priority, world_timestamp, updated_at)
-			 VALUES (?, ?, ?, ?, ?, ?)
-			 ON CONFLICT(uri) DO UPDATE SET content_hash=excluded.content_hash, vector=excluded.vector, priority=excluded.priority, world_timestamp=excluded.world_timestamp, updated_at=excluded.updated_at`,
+			`INSERT INTO embeddings (uri, seg_index, content_hash, vector, priority, world_timestamp, updated_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?)
+			 ON CONFLICT(uri, seg_index) DO UPDATE SET content_hash=excluded.content_hash, vector=excluded.vector, priority=excluded.priority, world_timestamp=excluded.world_timestamp, updated_at=excluded.updated_at`,
 		);
 		const seen = new Set<string>(docs.map((d) => d.uri));
 		this._db.exec("BEGIN");
 		try {
-			for (let i = 0; i < docs.length; i++) {
-				stmt.run(
-					docs[i].uri,
-					md5(`${docs[i].content}|${docs[i].searchTerms}`),
-					JSON.stringify([...vectors[i]]),
-					docs[i].priority,
-					docs[i].worldTimestamp,
-					nowMs(),
-				);
+			let vi = 0;
+			for (const doc of docs) {
+				const segs = segments.get(doc.uri) ?? [];
+				for (let si = 0; si < segs.length; si++) {
+					stmt.run(
+						doc.uri,
+						si,
+						md5(`${doc.content}|${doc.searchTerms}`),
+						JSON.stringify([...vectors[vi]]),
+						doc.priority,
+						doc.worldTimestamp,
+						nowMs(),
+					);
+					vi++;
+				}
 			}
 			// purge stale rows for this namespace's docs no longer present
 			const all = this._db.prepare("SELECT uri FROM embeddings").all() as unknown as Array<{
@@ -347,13 +402,26 @@ async function recall(
 		try {
 			const cached = cache.loadValid(namespace, pool);
 			const missing = pool.filter((d) => !cached.has(d.uri));
-			if (missing.length > 0) {
-				const vectors = await embed(
-					missing.map((d) => `${d.uri}\n${d.disclosure}\n${d.content}`.slice(0, EMBED_INPUT_MAX)),
+			// Chunk each doc into overlapping segments; short docs stay single.
+			const segByUri = new Map<string, string[]>();
+			for (const d of missing) {
+				segByUri.set(
+					d.uri,
+					chunkText(`${d.uri}\n${d.disclosure}\n${d.content}`, EMBED_INPUT_MAX, EMBED_CHUNK_OVERLAP),
 				);
+			}
+			const segTexts = [...segByUri.values()].flat();
+			if (segTexts.length > 0) {
+				const vectors = await embed(segTexts);
 				if (vectors) {
-					cache.save(missing, vectors, namespace);
-					for (let i = 0; i < missing.length; i++) cached.set(missing[i].uri, vectors[i]);
+					cache.save(missing, segByUri, vectors);
+					let vi = 0;
+					for (const d of missing) {
+						const n = (segByUri.get(d.uri) ?? []).length;
+						const segs = vectors.slice(vi, vi + n);
+						vi += n;
+						cached.set(d.uri, segs);
+					}
 				}
 			}
 			const qv = await embed([query.slice(0, EMBED_INPUT_MAX)]);
@@ -361,8 +429,16 @@ async function recall(
 			if (queryVec) {
 				mode = "vector";
 				for (const d of pool) {
-					const v = cached.get(d.uri);
-					if (v) vecScores.set(d.uri, cosine(queryVec, v));
+					const segs = cached.get(d.uri);
+					if (!segs || segs.length === 0) continue;
+					// Segment-level cosine, take the max: any strongly matching
+					// segment justifies recalling the memory.
+					let best = 0;
+					for (const v of segs) {
+						const c = cosine(queryVec, v);
+						if (c > best) best = c;
+					}
+					vecScores.set(d.uri, best);
 				}
 			}
 		} catch {

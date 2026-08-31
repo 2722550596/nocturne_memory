@@ -20,6 +20,7 @@ const EMBEDDING_API_KEY = process.env.NOCTURNE_EMBEDDING_API_KEY ?? "";
 const TOP_K = 5;
 const MIN_SCORE = 0.35;
 const EMBED_INPUT_MAX = 500;
+const EMBED_CHUNK_OVERLAP = 80;
 const W_VECTOR = 0.5;
 const W_KEYWORD = 0.3;
 const W_PRIORITY = 0.2;
@@ -113,6 +114,17 @@ function firstLineSummary(content) {
 	return first.length > MAX_SUMMARY_LEN ? first.slice(0, MAX_SUMMARY_LEN) + "……" : first;
 }
 
+function chunkText(text, maxLen, overlap) {
+	if (text.length === 0) return [""];
+	if (text.length <= maxLen) return [text];
+	const chunks = [];
+	const step = maxLen - overlap;
+	for (let start = 0; start < text.length; start += step) {
+		chunks.push(text.slice(start, start + maxLen));
+	}
+	return chunks;
+}
+
 async function embed(texts) {
 	if (texts.length === 0) return [];
 	if (!EMBEDDING_API_KEY) {
@@ -182,48 +194,75 @@ class VectorCache {
 		this.db = new DatabaseSync(cachePath);
 		this.db.exec(`
 			CREATE TABLE IF NOT EXISTS embeddings (
-				uri TEXT PRIMARY KEY,
+				uri TEXT NOT NULL,
+				seg_index INTEGER NOT NULL,
 				content_hash TEXT NOT NULL,
 				vector TEXT NOT NULL,
 				priority INTEGER NOT NULL DEFAULT 0,
 				world_timestamp TEXT,
-				updated_at INTEGER NOT NULL
+				updated_at INTEGER NOT NULL,
+				PRIMARY KEY (uri, seg_index)
 			)
 		`);
+		const cols = this.db.prepare("PRAGMA table_info(embeddings)").all();
+		if (!cols.some((c) => c.name === "seg_index")) {
+			this.db.exec("DROP TABLE embeddings");
+			this.db.exec(`
+				CREATE TABLE embeddings (
+					uri TEXT NOT NULL,
+					seg_index INTEGER NOT NULL,
+					content_hash TEXT NOT NULL,
+					vector TEXT NOT NULL,
+					priority INTEGER NOT NULL DEFAULT 0,
+					world_timestamp TEXT,
+					updated_at INTEGER NOT NULL,
+					PRIMARY KEY (uri, seg_index)
+				)
+			`);
+		}
 	}
 	loadValid(docs) {
 		const map = new Map();
-		const rows = this.db.prepare("SELECT uri, content_hash, vector FROM embeddings").all();
-		const byUri = new Map(rows.map((r) => [r.uri, r]));
+		const rows = this.db
+			.prepare("SELECT uri, seg_index, content_hash, vector FROM embeddings ORDER BY uri, seg_index")
+			.all();
 		const docHashes = new Map(docs.map((d) => [d.uri, md5(`${d.content}|${d.searchTerms}`)]));
-		for (const [uri, row] of byUri) {
-			const hash = docHashes.get(uri);
-			if (hash && hash === row.content_hash) {
-				try {
-					map.set(uri, Float32Array.from(JSON.parse(row.vector)));
-				} catch {}
-			}
+		for (const row of rows) {
+			const hash = docHashes.get(row.uri);
+			if (!hash || hash !== row.content_hash) continue;
+			try {
+				const v = Float32Array.from(JSON.parse(row.vector));
+				const list = map.get(row.uri);
+				if (list) list[row.seg_index] = v;
+				else map.set(row.uri, [v]);
+			} catch {}
 		}
 		return map;
 	}
-	save(docs, vectors) {
+	save(docs, segments, vectors) {
 		const stmt = this.db.prepare(
-			`INSERT INTO embeddings (uri, content_hash, vector, priority, world_timestamp, updated_at)
-			 VALUES (?, ?, ?, ?, ?, ?)
-			 ON CONFLICT(uri) DO UPDATE SET content_hash=excluded.content_hash, vector=excluded.vector, priority=excluded.priority, world_timestamp=excluded.world_timestamp, updated_at=excluded.updated_at`,
+			`INSERT INTO embeddings (uri, seg_index, content_hash, vector, priority, world_timestamp, updated_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?)
+			 ON CONFLICT(uri, seg_index) DO UPDATE SET content_hash=excluded.content_hash, vector=excluded.vector, priority=excluded.priority, world_timestamp=excluded.world_timestamp, updated_at=excluded.updated_at`,
 		);
 		const seen = new Set(docs.map((d) => d.uri));
 		this.db.exec("BEGIN");
 		try {
-			for (let i = 0; i < docs.length; i++) {
-				stmt.run(
-					docs[i].uri,
-					md5(`${docs[i].content}|${docs[i].searchTerms}`),
-					JSON.stringify([...vectors[i]]),
-					docs[i].priority,
-					docs[i].worldTimestamp,
-					Date.now(),
-				);
+			let vi = 0;
+			for (const doc of docs) {
+				const segs = segments.get(doc.uri) ?? [];
+				for (let si = 0; si < segs.length; si++) {
+					stmt.run(
+						doc.uri,
+						si,
+						md5(`${doc.content}|${doc.searchTerms}`),
+						JSON.stringify([...vectors[vi]]),
+						doc.priority,
+						doc.worldTimestamp,
+						Date.now(),
+					);
+					vi++;
+				}
 			}
 			const all = this.db.prepare("SELECT uri FROM embeddings").all();
 			const del = this.db.prepare("DELETE FROM embeddings WHERE uri = ?");
@@ -264,12 +303,26 @@ async function recall(query, namespace, cachePath) {
 			const cached = cache.loadValid(pool);
 			const missing = pool.filter((d) => !cached.has(d.uri));
 			if (missing.length > 0) {
-				const vectors = await embed(
-					missing.map((d) => `${d.uri}\n${d.disclosure}\n${d.content}`.slice(0, EMBED_INPUT_MAX)),
-				);
-				if (vectors) {
-					cache.save(missing, vectors);
-					for (let i = 0; i < missing.length; i++) cached.set(missing[i].uri, vectors[i]);
+				const segByUri = new Map();
+				for (const d of missing) {
+					segByUri.set(
+						d.uri,
+						chunkText(`${d.uri}\n${d.disclosure}\n${d.content}`, EMBED_INPUT_MAX, EMBED_CHUNK_OVERLAP),
+					);
+				}
+				const segTexts = [...segByUri.values()].flat();
+				if (segTexts.length > 0) {
+					const vectors = await embed(segTexts);
+					if (vectors) {
+						cache.save(missing, segByUri, vectors);
+						let vi = 0;
+						for (const d of missing) {
+							const n = (segByUri.get(d.uri) ?? []).length;
+							const segs = vectors.slice(vi, vi + n);
+							vi += n;
+							cached.set(d.uri, segs);
+						}
+					}
 				}
 			}
 			const qv = await embed([query.slice(0, EMBED_INPUT_MAX)]);
@@ -277,8 +330,14 @@ async function recall(query, namespace, cachePath) {
 			if (queryVec) {
 				mode = "vector";
 				for (const d of pool) {
-					const v = cached.get(d.uri);
-					if (v) vecScores.set(d.uri, cosine(queryVec, v));
+					const segs = cached.get(d.uri);
+					if (!segs || segs.length === 0) continue;
+					let best = 0;
+					for (const v of segs) {
+						const c = cosine(queryVec, v);
+						if (c > best) best = c;
+					}
+					vecScores.set(d.uri, best);
 				}
 			}
 		} finally {
@@ -354,6 +413,24 @@ for (const item of r3.items.slice(0, 3)) {
 	console.log(`             ${item.summary.slice(0, 60)}`);
 }
 
+console.log("4c. chunking behavior (tail keyword reachable)");
+{
+	// A doc whose key content sits ~800 chars in - beyond the old 500-char
+	// slice but inside the second chunk.
+	const filler = "这一天的风很轻，云很淡，街上没什么人。路灯一盏盏亮起来，影子被拉得很长。".repeat(18); // ~540 chars
+	const tail = "那天晚上，我收到了那枚蓝宝石胸针。她说是很多年前的东西，让我好好保管。";
+	const synthetic = { uri: "test://chunk_tail", content: filler + tail, disclosure: "", searchTerms: "", priority: 1, worldTimestamp: null };
+	const segs = chunkText(`${synthetic.uri}\n${synthetic.disclosure}\n${synthetic.content}`, EMBED_INPUT_MAX, EMBED_CHUNK_OVERLAP);
+	check(`long doc split into ${segs.length} segments`, segs.length >= 2, JSON.stringify(segs.map((s) => s.length)));
+	check("tail keyword in last segment", segs[segs.length - 1].includes("蓝宝石胸针"));
+
+	// Real recall: query only about the tail subject; the doc must be retrieved.
+	const q = "蓝宝石胸针 好好保管";
+	const tok = tokenizeForMatch(q);
+	const kw = keywordScore(tok, synthetic);
+	check(`tail keyword score > 0 (${kw.toFixed(2)})`, kw > 0);
+}
+
 console.log("5. dedup hash stability");
 {
 	const db = new DatabaseSync(DB_PATH, { readOnly: true });
@@ -380,6 +457,27 @@ console.log("7. top-1 anchor format");
 	check("block starts with <memories>", block.startsWith("<memories>"));
 	const first = block.split("\n").find((l) => /^\d+\./.test(l.trim()));
 	check("top-1 has [高度相关，建议读取] anchor", first?.includes("[高度相关，建议读取]"));
+}
+
+console.log("8. cache schema migration (legacy single-vector layout)");
+{
+	const migPath = join(CACHE_DIR, "migration-test.sqlite");
+	try { rmSync(migPath); } catch {}
+	// Simulate the pre-chunking cache: single vector per uri, no seg_index.
+	const legacy = new DatabaseSync(migPath);
+	legacy.exec("CREATE TABLE embeddings (uri TEXT PRIMARY KEY, content_hash TEXT NOT NULL, vector TEXT NOT NULL, priority INTEGER NOT NULL DEFAULT 0, world_timestamp TEXT, updated_at INTEGER NOT NULL)");
+	legacy.prepare("INSERT INTO embeddings VALUES (?, ?, ?, ?, ?, ?)").run(
+		"core://legacy", "abc", "[0.1,0.2,0.3]", 1, null, Date.now(),
+	);
+	legacy.close();
+	// Re-open via VectorCache -> must rebuild with seg_index.
+	const vc = new VectorCache(migPath);
+	const cols = vc.db.prepare("PRAGMA table_info(embeddings)").all().map((c) => c.name);
+	check("migrated table has seg_index", cols.includes("seg_index"));
+	const n = vc.db.prepare("SELECT COUNT(*) c FROM embeddings").get().c;
+	check("legacy rows dropped after migration", n === 0);
+	vc.db.close();
+	try { rmSync(migPath); } catch {}
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);
