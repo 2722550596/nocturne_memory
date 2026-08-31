@@ -25,13 +25,19 @@ def _default_snapshot_dir() -> str:
     # Per-world snapshot dir: derive from the active config's database_url
     # so each world DB gets its own changeset.json (avoids cross-DB
     # head_revision_id mismatches when --config selects a different DB).
+    #
+    # Multiple DBs in the same directory (e.g. per-world DBs under data/)
+    # must be isolated by database file name as well: sharing a single
+    # changeset.json across worlds leaks head_revision_id / pending rows
+    # between them (a foreign-key failure on revisions.parent_id was the
+    # symptom).
     try:
         import config as _cfg
         url = _cfg.get("database_url") or ""
         prefix = "sqlite+aiosqlite:///"
         if url.startswith(prefix) and len(url) > len(prefix):
             db_path = Path(url[len(prefix):])
-            return str(db_path.parent / "snapshots")
+            return str(db_path.parent / "snapshots" / db_path.stem)
     except Exception:
         pass
 
