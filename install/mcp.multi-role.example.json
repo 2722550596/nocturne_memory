@@ -1,0 +1,36 @@
+{
+  // 多角色（多进程、共用单 DB）MCP 配置样例
+  // 放法：每个角色/项目的目录下放一份 .pi/mcp.json（或 .mcp.json），
+  // pi 在项目目录启动时会发现它并拉起属于该角色的 nocturne 进程。
+  // 全局 ~/.pi/agent/mcp.json 里的 nocturne 条目应移除，避免同名合并或双进程抢端口。
+  //
+  // 关键点：
+  //   - NAMESPACE   每个角色不同 → 数据按 namespace 隔离，共用同一个 DB 不串库
+  //   - WEB_PORT    每个角色不同 → 各自的 web API/UI 端口（nocturne-tools.py 用 --api 指定）
+  //   - WORLD_CLOCK_* 每个角色不同 → 进程级世界时间（env 覆盖 config.json，无需改全局配置）
+  //   - DATABASE_URL 可省略 → 全部角色共用 config.json 里的同一个 DB 文件
+  //
+  // 管理工具：
+  //   python3 scripts/nocturne-tools.py --api http://127.0.0.1:8234 get luzhou core://identity
+  "settings": {
+    "directTools": true,
+    "disableProxyTool": true
+  },
+  "mcpServers": {
+    "": {
+      "command": "/home/yoshix7ti/projects/nocturne_memory/venv/bin/python",
+      "args": [
+        "/home/yoshix7ti/projects/nocturne_memory/backend/mcp_server.py"
+      ],
+      "env": {
+        "NAMESPACE": "elias",
+        "WEB_PORT": "8233",
+        "PYTHONPATH": "/home/yoshix7ti/projects/nocturne_memory/backend",
+        "WORLD_CLOCK_CURRENT_TIME": "2024-06-01",
+        "WORLD_CLOCK_AUTO_TIMESTAMP": "false",
+        "WORLD_CLOCK_SHOW_RELATIVE": "true",
+        "WORLD_CLOCK_FORMAT": "YYYY-MM-DD"
+      }
+    }
+  }
+}

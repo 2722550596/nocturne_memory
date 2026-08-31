@@ -63,6 +63,11 @@ class DatabaseManager:
             @event.listens_for(self.engine.sync_engine, "connect")
             def set_sqlite_pragma(dbapi_connection, connection_record):
                 cursor = dbapi_connection.cursor()
+                # WAL: concurrent readers + serialized writers across processes
+                # (multi-role mode shares one DB file). busy_timeout makes
+                # transient write locks wait instead of failing immediately.
+                cursor.execute("PRAGMA journal_mode=WAL")
+                cursor.execute("PRAGMA busy_timeout=10000")
                 cursor.execute("PRAGMA foreign_keys=ON")
                 cursor.close()
 
@@ -85,6 +90,11 @@ class DatabaseManager:
             @event.listens_for(self.engine.sync_engine, "connect")
             def set_sqlite_pragma(dbapi_connection, connection_record):
                 cursor = dbapi_connection.cursor()
+                # WAL: concurrent readers + serialized writers across processes
+                # (multi-role mode shares one DB file). busy_timeout makes
+                # transient write locks wait instead of failing immediately.
+                cursor.execute("PRAGMA journal_mode=WAL")
+                cursor.execute("PRAGMA busy_timeout=10000")
                 cursor.execute("PRAGMA foreign_keys=ON")
                 cursor.close()
         self.async_session = async_sessionmaker(

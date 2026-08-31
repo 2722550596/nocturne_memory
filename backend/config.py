@@ -6,8 +6,11 @@ First run (no config.json):
   2. Environment variables exist (Docker)? → generate config.json from them
   3. Nothing? → create config.json with defaults
 
-After config.json exists: it is the sole source of truth. Period.
-All settings can be changed via the Dashboard Settings UI or by editing config.json directly.
+After config.json exists: it is the file-level source of truth. Per-process
+environment variables (WEB_PORT, WORLD_CLOCK_*, DATABASE_URL, CORE_MEMORY_URIS…)
+override the file values at load time, so multiple role processes can share one
+config.json while diverging on port / world clock / namespace. This is the
+multi-role (multi-process, shared DB) mode; see `_env_overrides`.
 
 IMPORTANT: config.py NEVER writes to .env. The .env → config.json migration is
 read-only and one-directional. .env files containing only Docker Compose vars
@@ -87,6 +90,14 @@ _ENV_MAP: dict[str, str] = {
     "public_readonly_mcp": "PUBLIC_READONLY_MCP",
     "skip_migration_backup": "SKIP_MIGRATION_BACKUP",
     "locale": "LOCALE",
+}
+
+# world_clock is a nested dict; these flat env keys map into it.
+_WORLD_CLOCK_ENV_MAP: dict[str, str] = {
+    "WORLD_CLOCK_CURRENT_TIME": "current_time",
+    "WORLD_CLOCK_AUTO_TIMESTAMP": "auto_timestamp",
+    "WORLD_CLOCK_SHOW_RELATIVE": "show_relative",
+    "WORLD_CLOCK_FORMAT": "format",
 }
 
 
@@ -198,6 +209,24 @@ def _extract_boot_uris(source: dict) -> dict[str, list[str]]:
     return boot
 
 
+def _extract_world_clock(source: dict) -> dict:
+    """Extract a nested world_clock dict from flat env keys.
+
+    Only keys present in *source* are set, so partial overrides merge with the
+    file-level clock instead of replacing it wholesale.
+    """
+    clock: dict = {}
+    for env_key, cfg_key in _WORLD_CLOCK_ENV_MAP.items():
+        val = source.get(env_key)
+        if val is None:
+            continue
+        if cfg_key == "auto_timestamp":
+            clock[cfg_key] = str(val).lower() not in ("false", "0", "no")
+        else:
+            clock[cfg_key] = val
+    return clock
+
+
 def _build_cfg_from_kvs(kvs: dict) -> dict:
     """Build a config dict from flat key-value pairs (.env or env vars)."""
     cfg = dict(DEFAULTS)
@@ -211,7 +240,31 @@ def _build_cfg_from_kvs(kvs: dict) -> dict:
     boot = _extract_boot_uris(kvs)
     if boot:
         cfg["boot_uris"] = boot
+    clock = _extract_world_clock(kvs)
+    if clock:
+        cfg["world_clock"] = clock
     return cfg
+
+
+def _env_overrides() -> dict:
+    """Collect per-process overrides from os.environ on top of an existing
+    config.json (env wins). Only keys actually present in the environment are
+    returned, so a clean environment changes nothing."""
+    kvs = dict(os.environ)
+    out: dict = {}
+    for cfg_key, env_key in _ENV_MAP.items():
+        val = kvs.get(env_key)
+        if cfg_key == "web_port" and not val:
+            val = kvs.get("PORT")
+        if val:
+            out[cfg_key] = _coerce(cfg_key, val)
+    boot = _extract_boot_uris(kvs)
+    if boot:
+        out["boot_uris"] = boot
+    clock = _extract_world_clock(kvs)
+    if clock:
+        out["world_clock"] = clock
+    return out
 
 
 
@@ -281,6 +334,15 @@ def _load() -> dict:
                 raise RuntimeError(
                     t("config.db_migrated_not_writable").format(demo_db=_DEMO_DB)
                 ) from e
+
+        overrides = _env_overrides()
+        if overrides:
+            base_clock = _cache.get("world_clock", {}) or {}
+            for key, value in overrides.items():
+                if key == "world_clock":
+                    _cache["world_clock"] = {**base_clock, **value}
+                else:
+                    _cache[key] = value
 
         return _cache
 
