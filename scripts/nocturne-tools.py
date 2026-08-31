@@ -223,7 +223,7 @@ def cmd_put(args):
     # Determine if we should update or create
     if args.update:
         try:
-            node = api_get(f"/browse/node?domain={domain}&path={urllib.parse.quote(path)}&namespace={urllib.parse.quote(args.namespace)}")
+            node = api_get(f"/api/browse/node?domain={domain}&path={urllib.parse.quote(path)}&namespace={urllib.parse.quote(args.namespace)}")
             if node:
                 # Perform update instead
                 body = {
@@ -232,7 +232,7 @@ def cmd_put(args):
                     "disclosure": args.disclosure or node.get("disclosure", "Manual Entry"),
                     "world_timestamp": args.time or node.get("world_timestamp")
                 }
-                api_put(f"/browse/node?domain={domain}&path={urllib.parse.quote(path)}&namespace={urllib.parse.quote(args.namespace)}", body)
+                api_put(f"/api/browse/node?domain={domain}&path={urllib.parse.quote(path)}&namespace={urllib.parse.quote(args.namespace)}", body)
                 print(f"✓ 已更新: {domain}://{path}")
                 return
         except:
@@ -248,7 +248,7 @@ def cmd_put(args):
         "world_timestamp": args.time
     }
     
-    res = api_post(f"/browse/node?namespace={urllib.parse.quote(args.namespace)}", body)
+    res = api_post(f"/api/browse/node?namespace={urllib.parse.quote(args.namespace)}", body)
     uri = res["uri"]
     print(f"✓ 已创建: {uri}")
     if args.time:
@@ -260,7 +260,7 @@ def cmd_edit(args):
     domain, path = parse_uri(args.uri)
     
     # Fetch current state first
-    node = api_get(f"/browse/node?domain={domain}&path={urllib.parse.quote(path)}&namespace={urllib.parse.quote(args.namespace)}")
+    node = api_get(f"/api/browse/node?domain={domain}&path={urllib.parse.quote(path)}&namespace={urllib.parse.quote(args.namespace)}")
     
     content = args.content if args.content is not None else node["content"]
     priority = args.priority if args.priority is not None else node["priority"]
@@ -303,7 +303,7 @@ def cmd_edit(args):
         "world_timestamp": world_timestamp
     }
     
-    api_put(f"/browse/node?domain={domain}&path={urllib.parse.quote(path)}&namespace={urllib.parse.quote(args.namespace)}", body)
+    api_put(f"/api/browse/node?domain={domain}&path={urllib.parse.quote(path)}&namespace={urllib.parse.quote(args.namespace)}", body)
     print(f"✓ 已修改: {domain}://{path}")
     if args.time:
         print(f"  时间点更新为: {args.time}")
