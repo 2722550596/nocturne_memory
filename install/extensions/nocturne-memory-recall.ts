@@ -25,8 +25,8 @@ const CACHE_DIR = join(MEMORY_DIR, "data", "recall-cache");
 const CACHE_PATH = join(CACHE_DIR, "embeddings.sqlite");
 
 // Recall tuning
-const TOP_K = 5;
-const MIN_SCORE = 0.35;
+const TOP_K = 3;
+const MIN_SCORE = 0.5;
 const MAX_SUMMARY_LEN = 80;
 
 // BAAI/bge-large-zh-v1.5 max sequence is 512 tokens; ~1 zh char per token.
