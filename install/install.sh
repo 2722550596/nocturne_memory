@@ -17,18 +17,21 @@ mkdir -p "$EXT_DIR" "$PRE_DIR"
 # 2. Process and Install Extensions
 echo "==> Installing Extensions..."
 
-# Process nocturne-memory.ts to inject the actual path
-TMP_EXT=$(mktemp)
-sed "s|{{MEMORY_DIR}}|${PROJECT_DIR}|g" "${INSTALL_DIR}/extensions/nocturne-memory.ts" > "$TMP_EXT"
-
-if [ ! -f "${EXT_DIR}/nocturne-memory.ts" ]; then
-    cp "$TMP_EXT" "${EXT_DIR}/nocturne-memory.ts"
-    echo "    Installed: nocturne-memory.ts"
-else
-    echo "    Updating: nocturne-memory.ts"
-    cp "$TMP_EXT" "${EXT_DIR}/nocturne-memory.ts"
-fi
-rm "$TMP_EXT"
+# Extensions with {{MEMORY_DIR}}/{{PI_AGENT_DIR}} placeholders get them
+# substituted with the real project / agent dir paths.
+for ext in nocturne-memory.ts nocturne-memory-recall.ts; do
+    TMP_EXT=$(mktemp)
+    sed -e "s|{{MEMORY_DIR}}|${PROJECT_DIR}|g" -e "s|{{PI_AGENT_DIR}}|${PI_AGENT}|g" \
+        "${INSTALL_DIR}/extensions/${ext}" > "$TMP_EXT"
+    if [ ! -f "${EXT_DIR}/${ext}" ]; then
+        cp "$TMP_EXT" "${EXT_DIR}/${ext}"
+        echo "    Installed: ${ext}"
+    else
+        echo "    Updating: ${ext}"
+        cp "$TMP_EXT" "${EXT_DIR}/${ext}"
+    fi
+    rm "$TMP_EXT"
+done
 
 # Install parse-think-tags.ts (symlink)
 if [ ! -f "${EXT_DIR}/parse-think-tags.ts" ]; then
