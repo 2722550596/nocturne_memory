@@ -7,6 +7,8 @@ Maintains derived search rows (search_documents / search_documents_fts)
 and provides full-text search across the memory graph.
 """
 
+import asyncio
+import logging
 from typing import Optional, Dict, Any, List, TYPE_CHECKING
 
 from sqlalchemy import select, delete, text, or_
@@ -24,6 +26,9 @@ from .search_terms import build_document_search_terms, expand_query_terms
 
 if TYPE_CHECKING:
     from .database import DatabaseManager
+    from .embeddings import EmbeddingService
+
+logger = logging.getLogger(__name__)
 
 
 class SearchIndexer:
@@ -34,10 +39,11 @@ class SearchIndexer:
     tsvector backends.
     """
 
-    def __init__(self, db: "DatabaseManager"):
+    def __init__(self, db: "DatabaseManager", embedding_service: Optional["EmbeddingService"] = None):
         self._session = db.session
         self._optional_session = db._optional_session
         self.db_type = db.db_type
+        self._embedding = embedding_service
 
     # -----------------------------------------------------------------
     # Query helpers (stateless)
@@ -216,22 +222,39 @@ class SearchIndexer:
         session.add_all(SearchDocument(**doc) for doc in documents)
         await session.flush()
 
-        if self.db_type != "sqlite":
-            return
+        if self.db_type == "sqlite":
+            for doc in documents:
+                await session.execute(
+                    text(
+                        """
+                        INSERT INTO search_documents_fts (
+                            namespace, domain, path, node_uuid, uri, content, disclosure, search_terms
+                        ) VALUES (
+                            :namespace, :domain, :path, :node_uuid, :uri, :content, coalesce(:disclosure, ''), :search_terms
+                        )
+                        """
+                    ),
+                    doc,
+                )
 
-        for doc in documents:
-            await session.execute(
-                text(
-                    """
-                    INSERT INTO search_documents_fts (
-                        namespace, domain, path, node_uuid, uri, content, disclosure, search_terms
-                    ) VALUES (
-                        :namespace, :domain, :path, :node_uuid, :uri, :content, coalesce(:disclosure, ''), :search_terms
-                    )
-                    """
-                ),
-                doc,
-            )
+        # Semantic backfill: schedule embedding of the freshly inserted rows in
+        # the background.  Never blocks this transaction; failures are
+        # swallowed inside _embed_docs_async (log-only).
+        asyncio.create_task(self._embed_docs_async(documents))
+
+    async def _embed_docs_async(self, documents: List[Dict[str, Any]]) -> None:
+        """Background semantic backfill for freshly inserted search rows.
+
+        Runs inside EmbeddingService with its own session — never borrows the
+        caller's transaction.  All failures are logged, never raised, so a
+        broken embedding API cannot disturb graph writes.
+        """
+        if not self._embedding or not self._embedding.enabled() or not documents:
+            return
+        try:
+            await self._embedding.ensure_documents_embeddings(documents)
+        except Exception:
+            logger.warning("embedding backfill failed", exc_info=True)
 
     async def refresh_search_documents_for_node(
         self, node_uuid: str, session: Optional[AsyncSession] = None, namespace: str = "", refresh_all_namespaces: bool = False
@@ -413,14 +436,123 @@ class SearchIndexer:
             )
         return rows
 
+    async def _semantic_pass(
+        self,
+        session,
+        query: str,
+        *,
+        limit: int = 10,
+        domain: Optional[str] = None,
+        namespace: str = "",
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Vector-only retrieval pass (semantic=True).
+
+        Returns ranked match dicts (with 'score' = max-segment cosine), or
+        None when the query embedding fails so the caller falls back to the
+        lexical path.  Documents without fresh segment vectors are scheduled
+        for background backfill — the first semantic query may trigger one
+        batch of embeds, later queries are fully cached.
+        """
+        if not self._embedding:
+            return None
+        query_vec = await self._embedding.embed_query(query)
+        if query_vec is None:
+            return None
+
+        domain_clause = ""
+        params: Dict[str, Any] = {"namespace": namespace}
+        if domain is not None:
+            params["domain"] = domain
+            domain_clause = "AND sd.domain = :domain"
+
+        result = await session.execute(
+            text(
+                f"""
+                SELECT
+                    sd.namespace, sd.domain, sd.path, sd.node_uuid, sd.uri,
+                    sd.priority, sd.disclosure, sd.world_timestamp,
+                    sd.content, sd.search_terms
+                FROM search_documents AS sd
+                WHERE sd.namespace = :namespace
+                  {domain_clause}
+                """
+            ),
+            params,
+        )
+        docs = [dict(r) for r in result.mappings()]
+        if not docs:
+            return []
+
+        doc_vectors = await self._embedding.load_vectors(namespace, docs)
+        scores = self._embedding.cosine_matrix(query_vec, doc_vectors)
+
+        # Background backfill for documents without fresh vectors.
+        missing = [
+            d for d in docs
+            if (d["namespace"], d["domain"], d["path"]) not in doc_vectors
+        ]
+        if missing:
+            asyncio.create_task(self._embed_docs_async(missing))
+
+        candidate_limit = max(limit * 5, 50)
+        ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)[:candidate_limit]
+
+        by_key = {(d["namespace"], d["domain"], d["path"]): d for d in docs}
+        rows: List[Dict[str, Any]] = []
+        for key, score in ranked:
+            d = by_key[key]
+            rows.append(
+                {
+                    "domain": d["domain"],
+                    "path": d["path"],
+                    "node_uuid": d["node_uuid"],
+                    "uri": d["uri"],
+                    "name": d["path"].rsplit("/", 1)[-1],
+                    "snippet": self._format_search_snippet(d["content"], query),
+                    "priority": d["priority"],
+                    "disclosure": d["disclosure"],
+                    "world_timestamp": d["world_timestamp"],
+                    "score": score,
+                }
+            )
+        return rows
+
+    @staticmethod
+    def _rrf_merge(ranked_lists: List[List[Dict[str, Any]]], k: int = 60) -> List[Dict[str, Any]]:
+        """Reciprocal-rank fusion of several best-first ranked result lists.
+
+        Each list's rows carry a 'score' key whose *value* is ignored — only
+        rank matters, so lexical (BM25, lower-is-better) and vector (cosine,
+        higher-is-better) passes fuse without scale alignment.  Deduplicates by
+        node_uuid keeping the metadata of the first-seen row; ties keep list
+        order.  Returns rows with an extra '_rrf' key.
+        """
+        fused: Dict[str, Dict[str, Any]] = {}
+        for ranked in ranked_lists:
+            for rank, row in enumerate(ranked):
+                node_uuid = row["node_uuid"]
+                entry = fused.get(node_uuid)
+                if entry is None:
+                    entry = dict(row)
+                    entry["_rrf"] = 0.0
+                    fused[node_uuid] = entry
+                entry["_rrf"] += 1.0 / (k + rank + 1)
+        return sorted(fused.values(), key=lambda r: r["_rrf"], reverse=True)
+
     async def search(
-        self, query: str, limit: int = 10, domain: Optional[str] = None, namespace: str = ""
+        self, query: str, limit: int = 10, domain: Optional[str] = None, namespace: str = "", semantic: bool = False
     ) -> List[Dict[str, Any]]:
         """Search memories with AND-first, OR-fallback strategy.
 
         1. Strict AND pass — all query tokens must appear. Highest precision.
         2. If AND yields fewer than *limit* results, run an OR pass and
            merge, keeping AND results at the top.
+
+        With ``semantic=True`` (and an embedding API configured) an additional
+        vector pass is fused in via reciprocal-rank fusion, so memories that
+        are semantically related — without any keyword overlap — are recalled
+        too.  Without it (or when vectors are unavailable) this behaves
+        byte-identically to the legacy lexical path.
         """
         async with self._session() as session:
             # Pass 1: AND (strict)
@@ -428,6 +560,30 @@ class SearchIndexer:
                 session, query, use_or=False, limit=limit, domain=domain, namespace=namespace
             )
 
+            # Semantic fusion path: build a full lexical candidate list
+            # (AND + OR fallback), fuse it with the vector pass, return.
+            if semantic and self._embedding and self._embedding.enabled():
+                vector_rows = await self._semantic_pass(
+                    session, query, limit=limit, domain=domain, namespace=namespace
+                )
+                if vector_rows is not None:
+                    or_rows = await self._search_pass(
+                        session, query, use_or=True, limit=limit, domain=domain, namespace=namespace
+                    )
+                    lexical: List[Dict[str, Any]] = []
+                    seen: set = set()
+                    for row in and_rows + or_rows:
+                        if row["node_uuid"] in seen:
+                            continue
+                        seen.add(row["node_uuid"])
+                        lexical.append(row)
+                    fused = self._rrf_merge([lexical, vector_rows])[:limit]
+                    return [
+                        {k: v for k, v in m.items() if k not in ("score", "_rrf")}
+                        for m in fused
+                    ]
+
+            # Legacy lexical path (byte-identical to pre-semantic behaviour).
             matches: List[Dict[str, Any]] = []
             seen_nodes: set = set()
 

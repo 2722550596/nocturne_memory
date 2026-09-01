@@ -117,6 +117,24 @@ async def test_mcp_tool_flow_covers_crud_alias_triggers_and_search(mcp_module, g
     assert removed_alias is None
 
 
+@pytest.mark.asyncio
+async def test_search_memory_semantic_without_key_degrades_to_lexical(mcp_module, graph_service):
+    """semantic=True with no embedding key returns normal lexical results."""
+    await graph_service.create_memory(
+        parent_path="",
+        content="GraphService owns alias refreshes",
+        priority=2,
+        title="semantic_mcp_note",
+        disclosure="When testing MCP semantic search",
+    )
+
+    result = await mcp_module.search_memory("GraphService", semantic=True)
+    message = getattr(result, "message", str(result))
+
+    assert "core://semantic_mcp_note" in message
+    assert "找到了" in message
+
+
 # =============================================================================
 # Unit tests for normalize_with_positions
 # =============================================================================

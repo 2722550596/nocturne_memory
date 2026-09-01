@@ -61,6 +61,13 @@ async def isolated_test_environment(tmp_path, monkeypatch):
     monkeypatch.setenv("SNAPSHOT_DIR", str(snapshot_dir))
     monkeypatch.setenv("CORE_MEMORY_URIS", ",".join(CORE_MEMORY_URIS))
     monkeypatch.setenv("API_TOKEN", "")
+    # Semantic search must default to disabled in tests: the developer's shell
+    # may carry NOCTURNE_EMBEDDING_* (used by the recall extension), and tests
+    # never touch the network.  Tests that need an embedding service inject a
+    # fake instead of configuring a real API key.
+    for env_key in ("NOCTURNE_EMBEDDING_API_KEY", "NOCTURNE_EMBEDDING_MODEL",
+                    "NOCTURNE_EMBEDDING_API_URL", "NOCTURNE_EMBEDDING_BATCH_SIZE"):
+        monkeypatch.delenv(env_key, raising=False)
 
     import json
     import config
@@ -77,7 +84,6 @@ async def isolated_test_environment(tmp_path, monkeypatch):
     }))
     monkeypatch.setattr(config, "CONFIG_PATH", test_config_path)
     config._invalidate()
-
     import db.snapshot as snapshot_module
 
     snapshot_module._store = None

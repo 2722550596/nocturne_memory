@@ -99,12 +99,12 @@ export default function nocturneMemoryExtension(pi: ExtensionAPI): void {
         });
         if (!res.ok) {
           const txt = await res.text();
-          ctx.ui.print(`\n[Nocturne Memory] Checkout to revision ${targetRevId} failed: ${txt}`);
+          ctx.ui.notify(`[Nocturne Memory] Checkout to revision ${targetRevId} failed: ${txt}`, "error");
         } else {
-          ctx.ui.print(`\n[Nocturne Memory] Synced memory DB to revision ${targetRevId}.`);
+          ctx.ui.notify(`[Nocturne Memory] Synced memory DB to revision ${targetRevId}.`, "info");
         }
       } catch (err) {
-        ctx.ui.print(`\n[Nocturne Memory] Error connecting to API: ${err}`);
+        ctx.ui.notify(`[Nocturne Memory] Error connecting to API: ${err}`, "error");
       }
     }
   });

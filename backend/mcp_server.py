@@ -440,16 +440,18 @@ async def browse_memory(uri: str, character_id: str = "") -> str:
 
 
 @mcp.tool()
-async def search_memory(query: str, domain: Optional[str] = None, limit: int = 10, sort_by_world: bool = False, character_id: str = "") -> str:
+async def search_memory(query: str, domain: Optional[str] = None, limit: int = 10, sort_by_world: bool = False, semantic: bool = False, character_id: str = "") -> str:
     """搜索记忆。想不起 URI 的时候用这个来找。
 
-    这是全文搜索，不是语义搜索。输入关键词就能找到相关记忆。
+    默认是全文搜索（词法），输入关键词就能找到相关记忆。
+    semantic=True 时启用语义检索（需要配置 embedding API），能召回关键词不重叠但语义相关的记忆；未配置 embedding API 时自动退化为词法搜索。
 
     Args:
         query: 搜索关键词
         domain: 可选，限定在某个域名下搜索（如 "core"、"history"）
         limit: 最多返回多少条（默认 10）
         sort_by_world: 是否按世界时间排序（默认按现实时间）
+        semantic: 是否启用语义检索（向量召回 + 词法融合；需配置 embedding API）
         character_id: 你的角色 ID（用于记忆隔离），如 "player"/"elena"/"world"。留空用默认 namespace。
     """
     graph = get_graph_service()
@@ -462,7 +464,7 @@ async def search_memory(query: str, domain: Optional[str] = None, limit: int = 1
 
         async def _search():
             return await graph.search_memories(
-                query, domain, limit=limit, namespace=get_namespace()
+                query, domain, limit=limit, namespace=get_namespace(), semantic=semantic
             )
 
         if character_id:

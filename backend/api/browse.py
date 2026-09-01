@@ -406,8 +406,9 @@ async def search_memories(
     q: str = Query(..., min_length=1, description="Search query"),
     domain: Optional[str] = Query(None, description="Optional domain filter"),
     limit: int = Query(20, ge=1, le=100),
+    semantic: bool = Query(False, description="Enable semantic (vector) search"),
 ):
     """Search memories across the graph."""
     search = get_search_indexer()
-    results = await search.search(q, limit, domain, namespace=get_namespace())
+    results = await search.search(q, limit, domain, namespace=get_namespace(), semantic=semantic)
     return results

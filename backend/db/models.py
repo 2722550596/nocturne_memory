@@ -226,6 +226,29 @@ class SearchDocument(Base):
     updated_at = Column(DateTime, default=datetime.now)
 
 
+class SearchDocumentEmbedding(Base):
+    """Vector embedding segments for one search document (semantic recall).
+
+    Vectors are stored as TEXT JSON arrays on purpose (no sqlite-vec /
+    pgvector extension).  No ForeignKey to ``search_documents`` - its primary
+    key is composite with no autoincrement id, so consistency is maintained
+    by code-level hash reconciliation (md5 of content|search_terms): stale
+    segments are deleted and re-embedded when the source content changes, and
+    rows for deleted documents never participate in scoring.
+    """
+
+    __tablename__ = "search_document_embeddings"
+
+    namespace = Column(String(64), primary_key=True, default="")
+    domain = Column(String(64), primary_key=True, default="core")
+    path = Column(String(512), primary_key=True)
+    seg_index = Column(Integer, primary_key=True)
+    content_hash = Column(Text, nullable=False)
+    vector = Column(Text, nullable=False)  # JSON array string
+    model = Column(String(128), nullable=False)
+    updated_at = Column(Integer, nullable=False)  # epoch ms
+
+
 class MemoryAccessLog(Base):
     """Asynchronous access log for tracking memory reading frequency and sequences."""
 

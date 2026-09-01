@@ -78,6 +78,16 @@ DEFAULTS: dict[str, Any] = {
     "public_readonly_mcp": False,
     "skip_migration_backup": False,
     "locale": None,
+    # Semantic search (vector) config. api_key empty -> semantic search
+    # degrades to lexical search; the recall extension stays untouched.
+    "embedding": {
+        "model": "BAAI/bge-large-zh-v1.5",
+        "api_url": "https://api.siliconflow.cn/v1",
+        "api_key": "",
+        "batch_size": 32,
+        "max_input_chars": 500,
+        "chunk_overlap": 80,
+    },
 }
 
 _ENV_MAP: dict[str, str] = {
@@ -99,6 +109,14 @@ _WORLD_CLOCK_ENV_MAP: dict[str, str] = {
     "WORLD_CLOCK_AUTO_TIMESTAMP": "auto_timestamp",
     "WORLD_CLOCK_SHOW_RELATIVE": "show_relative",
     "WORLD_CLOCK_FORMAT": "format",
+}
+
+# embedding is a nested dict; these flat env keys map into it.
+_EMBEDDING_ENV_MAP: dict[str, str] = {
+    "NOCTURNE_EMBEDDING_MODEL": "model",
+    "NOCTURNE_EMBEDDING_API_URL": "api_url",
+    "NOCTURNE_EMBEDDING_API_KEY": "api_key",
+    "NOCTURNE_EMBEDDING_BATCH_SIZE": "batch_size",
 }
 
 
@@ -228,6 +246,27 @@ def _extract_world_clock(source: dict) -> dict:
     return clock
 
 
+def _extract_embedding(source: dict) -> dict:
+    """Extract a nested embedding dict from flat env keys.
+
+    Only keys present in *source* are set, so partial overrides merge with the
+    file-level embedding config instead of replacing it wholesale.
+    """
+    embedding: dict = {}
+    for env_key, cfg_key in _EMBEDDING_ENV_MAP.items():
+        val = source.get(env_key)
+        if val is None:
+            continue
+        if cfg_key == "batch_size":
+            try:
+                embedding[cfg_key] = int(val)
+            except (TypeError, ValueError):
+                continue
+        else:
+            embedding[cfg_key] = val
+    return embedding
+
+
 def _build_cfg_from_kvs(kvs: dict) -> dict:
     """Build a config dict from flat key-value pairs (.env or env vars)."""
     cfg = dict(DEFAULTS)
@@ -244,6 +283,9 @@ def _build_cfg_from_kvs(kvs: dict) -> dict:
     clock = _extract_world_clock(kvs)
     if clock:
         cfg["world_clock"] = clock
+    embedding = _extract_embedding(kvs)
+    if embedding:
+        cfg["embedding"] = {**cfg.get("embedding", {}), **embedding}
     return cfg
 
 
@@ -265,6 +307,9 @@ def _env_overrides() -> dict:
     clock = _extract_world_clock(kvs)
     if clock:
         out["world_clock"] = clock
+    embedding = _extract_embedding(kvs)
+    if embedding:
+        out["embedding"] = embedding
     return out
 
 
@@ -339,9 +384,18 @@ def _load() -> dict:
         overrides = _env_overrides()
         if overrides:
             base_clock = _cache.get("world_clock", {}) or {}
+            base_embedding = _cache.get("embedding", {}) or {}
+            base_boot = _cache.get("boot_uris", {}) or {}
             for key, value in overrides.items():
                 if key == "world_clock":
                     _cache["world_clock"] = {**base_clock, **value}
+                elif key == "embedding":
+                    _cache["embedding"] = {**base_embedding, **value}
+                elif key == "boot_uris":
+                    # Nested merge like the other dict sections: env overrides
+                    # only the keys it provides (e.g. "" via CORE_MEMORY_URIS)
+                    # and must NOT wipe per-namespace overrides from config.json.
+                    _cache["boot_uris"] = {**base_boot, **value}
                 else:
                     _cache[key] = value
 
@@ -437,6 +491,19 @@ def get_clock_state() -> tuple[bool, Optional[str]]:
 def get_all_boot_uris() -> dict[str, list[str]]:
     """Get the full boot_uris dict (all namespaces)."""
     return dict(_load().get("boot_uris", {}))
+
+
+def get_embedding_config() -> dict:
+    """Get the embedding (semantic search) config section.
+
+    Empty api_key means semantic search is disabled and search_memory
+    degrades to lexical search.  Defaults are always filled in so partial
+    env overrides (e.g. only NOCTURNE_EMBEDDING_API_KEY) still yield a
+    complete section.
+    """
+    base = dict(DEFAULTS.get("embedding", {}))
+    base.update(_load().get("embedding", {}))
+    return base
 
 
 def set_boot_uris(uris: list[str], namespace: str = "") -> None:

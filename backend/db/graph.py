@@ -161,10 +161,10 @@ class GraphService:
             }
 
     async def search_memories(
-        self, query: str, domain: Optional[str] = None, limit: int = 10, namespace: str = ""
+        self, query: str, domain: Optional[str] = None, limit: int = 10, namespace: str = "", semantic: bool = False
     ) -> List[Dict[str, Any]]:
         """Wrapper around SearchIndexer.search."""
-        return await self._search.search(query, limit=limit, domain=domain, namespace=namespace)
+        return await self._search.search(query, limit=limit, domain=domain, namespace=namespace, semantic=semantic)
 
     async def get_paths_for_node(
         self,
