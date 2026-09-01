@@ -2,7 +2,7 @@ import type { BeforeAgentStartEvent, ExtensionAPI, ExtensionContext } from "@ear
 import { DatabaseSync } from "node:sqlite";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 // ── Config ──────────────────────────────────────────────────────────────────
 
@@ -10,8 +10,23 @@ import { join } from "node:path";
 const MEMORY_DIR = "{{MEMORY_DIR}}";
 const PI_AGENT_DIR = "{{PI_AGENT_DIR}}";
 
-const DB_PATH = join(MEMORY_DIR, "data", "nocturne_data_fc852c.db");
 const CONFIG_PATH = join(MEMORY_DIR, "config.json");
+
+// Resolve the source DB from config.json (database_url) instead of hardcoding
+// a file name, so recall stays in sync with whichever DB the MCP servers are
+// actually using. Falls back to the historical default when unreadable.
+function resolveDbPath(): string {
+	try {
+		const cfg = JSON.parse(readFileSync(CONFIG_PATH, "utf-8"));
+		const url = String(cfg?.database_url ?? "");
+		const m = url.match(/sqlite\+aiosqlite:\/\/\/(.+)$/);
+		if (m) return m[1];
+	} catch {
+		// fall through to default
+	}
+	return join(MEMORY_DIR, "data", "nocturne_data_fc852c.db");
+}
+const DB_PATH = resolveDbPath();
 
 // Embedding API. The key MUST come from the environment (NOCTURNE_EMBEDDING_API_KEY) —
 // this repo is public, never hardcode credentials. When the key is missing,
@@ -21,12 +36,12 @@ const EMBEDDING_API_URL = "https://api.siliconflow.cn/v1";
 const EMBEDDING_API_KEY = process.env.NOCTURNE_EMBEDDING_API_KEY ?? "";
 
 // Vector cache location (next to source DB, not in pi agent dir)
-const CACHE_DIR = join(MEMORY_DIR, "data", "recall-cache");
+const CACHE_DIR = join(dirname(DB_PATH), "recall-cache");
 const CACHE_PATH = join(CACHE_DIR, "embeddings.sqlite");
 
 // Recall tuning
 const TOP_K = 3;
-const MIN_SCORE = 0.5;
+const MIN_SCORE = 0.35;
 const MAX_SUMMARY_LEN = 80;
 
 // BAAI/bge-large-zh-v1.5 max sequence is 512 tokens; ~1 zh char per token.
@@ -56,22 +71,56 @@ function md5(text: string): string {
 	return createHash("md5").update(text, "utf-8").digest("hex");
 }
 
+function readNamespaceFromMcp(filePath: string): string | null {
+	try {
+		const raw = JSON.parse(readFileSync(filePath, "utf-8"));
+		const servers = raw?.mcpServers ?? {};
+		const names = Object.keys(servers);
+		// Prefer the unnamed server (tools registered without prefix)
+		const un = servers[""];
+		if (un?.env?.NAMESPACE) return un.env.NAMESPACE;
+		// A single named server is unambiguous (e.g. meta with "nocturne")
+		if (names.length === 1 && servers[names[0]]?.env?.NAMESPACE) {
+			return servers[names[0]].env.NAMESPACE;
+		}
+		// Multiple named servers (e.g. magnolia elias+mingrui): cannot
+		// auto-pick — the caller must set NOCTURNE_NAMESPACE explicitly.
+		return null;
+	} catch {
+		return null;
+	}
+}
+
+function getProjectConfigDirName(): string {
+	return process.env.PI_PROJECT_CONFIG_DIR?.trim() || ".pi";
+}
+
 function detectNamespace(): string {
-	// 1. mcp.json NAMESPACE env (authoritative - matches what the character's
-	//    browse_memory tools actually read)
-	const mcpPath = join(PI_AGENT_DIR, "mcp.json");
-	try {
-		const raw = JSON.parse(readFileSync(mcpPath, "utf-8"));
-		const ns = raw?.mcpServers?.[""]?.env?.NAMESPACE;
-		if (typeof ns === "string" && ns.length > 0) return ns;
-	} catch {}
-	// 2. config.json database_url fallback
-	try {
-		const cfg = JSON.parse(readFileSync(CONFIG_PATH, "utf-8"));
-		const url = String(cfg?.database_url ?? "");
-		const m = url.match(/nocturne_data_([0-9a-f]+)\.db/);
-		if (m) return m[1];
-	} catch {}
+	// 1. Explicit per-process override — required for multi-server worlds
+	//    (magnolia: elias + mingrui) and always wins.
+	const explicit = process.env.NOCTURNE_NAMESPACE?.trim();
+	if (explicit) return explicit;
+
+	// 2. Project-level configs (cwd), matching the pi config discovery order:
+	//    .pi/mcp.json then .mcp.json. Authoritative for multi-role setups.
+	const cwd = process.cwd();
+	const projectCandidates = [
+		join(cwd, getProjectConfigDirName(), "mcp.json"),
+		join(cwd, ".mcp.json"),
+	];
+	for (const p of projectCandidates) {
+		if (existsSync(p)) {
+			const ns = readNamespaceFromMcp(p);
+			if (ns) return ns;
+		}
+	}
+
+	// 3. Global pi mcp.json (legacy single-role setups)
+	const globalNs = readNamespaceFromMcp(join(PI_AGENT_DIR, "mcp.json"));
+	if (globalNs) return globalNs;
+
+	// 4. No usable namespace: return "" so recall degrades to a no-op instead
+	//    of guessing (the old database-hash fallback was never a namespace).
 	return "";
 }
 
@@ -336,9 +385,23 @@ interface WorldClock {
 }
 
 function loadWorldClock(): WorldClock {
+	// Per-process env overrides (multi-role: each role process injects its
+	// own clock via the project-level .pi/mcp.json env block).
+	const envEnabled = process.env.WORLD_CLOCK_ENABLED?.trim();
+	if (envEnabled && ["false", "0", "no"].includes(envEnabled.toLowerCase())) {
+		// Real-clock mode: recency is measured against today.
+		return { current_time: new Date().toISOString().slice(0, 10) };
+	}
+	const envTime = process.env.WORLD_CLOCK_CURRENT_TIME?.trim();
+	if (envTime) return { current_time: envTime };
+	// Fall back to the file-level clock (shared config.json).
 	try {
 		const cfg = JSON.parse(readFileSync(CONFIG_PATH, "utf-8"));
-		return { current_time: cfg?.world_clock?.current_time ?? null };
+		const clock = cfg?.world_clock ?? {};
+		if (clock.enabled === false) {
+			return { current_time: new Date().toISOString().slice(0, 10) };
+		}
+		return { current_time: clock.current_time ?? null };
 	} catch {
 		return { current_time: null };
 	}
