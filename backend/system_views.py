@@ -13,6 +13,7 @@ import asyncio
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
+import config as _cfg
 from db import get_graph_service, get_glossary_service
 from db.namespace import get_namespace
 from locales import t
@@ -62,13 +63,13 @@ async def fetch_and_format_memory(uri: str, track_access: bool = False) -> str:
     # --- World Time Context ---
     config = get_config()
     world_clock = config.get("world_clock", {})
-    curr_world_time = world_clock.get("current_time")
+    _, curr_world_time = _cfg.get_clock_state()
     mem_world_time = memory.get("world_timestamp")
 
     if curr_world_time:
         if mem_world_time:
             rel_str = calculate_relative_world_time(mem_world_time, curr_world_time)
-            if rel_str:
+            if rel_str and world_clock.get("show_relative", True) is not False:
                 lines.append(f"> (发生于: {mem_world_time}，{rel_str})")
             else:
                 lines.append(f"> (发生于: {mem_world_time})")
@@ -158,11 +159,10 @@ async def generate_boot_memory_view(core_memory_uris: List[str]) -> str:
     output_parts = []
     from mcp_server import get_config
     config = get_config()
-    world_clock = config.get("world_clock", {})
-    curr_world_time = world_clock.get("current_time")
+    clock_enabled, curr_world_time = _cfg.get_clock_state()
 
     output_parts.append("# 核心记忆 (Core Memories)")
-    if curr_world_time:
+    if clock_enabled and curr_world_time:
         output_parts.append(f"> 当前世界时间: {curr_world_time}")
     output_parts.append(f"> 载入状态: {loaded}/{len(core_memory_uris)} 条记忆已浮现")
     output_parts.append("")
@@ -422,7 +422,7 @@ async def _format_memory_clean(uri: str, ns: str, graph, max_children: int = 3) 
     disclosure = detail.get("disclosure")
     config = get_config()
     world_clock = config.get("world_clock", {})
-    curr_world_time = world_clock.get("current_time")
+    _, curr_world_time = _cfg.get_clock_state()
     mem_world_time = detail.get("world_timestamp")
 
     lines: List[str] = []
@@ -431,7 +431,7 @@ async def _format_memory_clean(uri: str, ns: str, graph, max_children: int = 3) 
     if curr_world_time:
         if mem_world_time:
             rel_str = calculate_relative_world_time(mem_world_time, curr_world_time)
-            if rel_str:
+            if rel_str and world_clock.get("show_relative", True) is not False:
                 lines.append(f"> (发生于: {mem_world_time}，{rel_str})")
             else:
                 lines.append(f"> (发生于: {mem_world_time})")
@@ -510,7 +510,7 @@ async def _format_recent_domain_clean(domain: str, ns: str, graph, limit: int) -
         lines: List[str] = []
         config = get_config()
         world_clock = config.get("world_clock", {})
-        curr_world_time = world_clock.get("current_time")
+        _, curr_world_time = _cfg.get_clock_state()
         mem_world_time = entry.get("world_timestamp")
 
         lines: List[str] = []
@@ -624,12 +624,11 @@ async def generate_memory_slot_view(slot_type: str, boot_uris: List[str] = None)
     
     from mcp_server import get_config
     config = get_config()
-    world_clock = config.get("world_clock", {})
-    curr_world_time = world_clock.get("current_time")
+    clock_enabled, curr_world_time = _cfg.get_clock_state()
 
     if slot_type == "boot":
         blocks = []
-        if curr_world_time:
+        if clock_enabled and curr_world_time:
             blocks.append(f"> 当前世界时间: {curr_world_time}")
 
         if boot_uris:

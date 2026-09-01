@@ -94,6 +94,7 @@ _ENV_MAP: dict[str, str] = {
 
 # world_clock is a nested dict; these flat env keys map into it.
 _WORLD_CLOCK_ENV_MAP: dict[str, str] = {
+    "WORLD_CLOCK_ENABLED": "enabled",
     "WORLD_CLOCK_CURRENT_TIME": "current_time",
     "WORLD_CLOCK_AUTO_TIMESTAMP": "auto_timestamp",
     "WORLD_CLOCK_SHOW_RELATIVE": "show_relative",
@@ -220,7 +221,7 @@ def _extract_world_clock(source: dict) -> dict:
         val = source.get(env_key)
         if val is None:
             continue
-        if cfg_key == "auto_timestamp":
+        if cfg_key in ("enabled", "auto_timestamp"):
             clock[cfg_key] = str(val).lower() not in ("false", "0", "no")
         else:
             clock[cfg_key] = val
@@ -415,6 +416,22 @@ def get_boot_uris(namespace: str = "") -> list[str]:
     if "" in boot:
         return boot[""]
     return []
+
+
+def get_clock_state() -> tuple[bool, Optional[str]]:
+    """Return (enabled, reference_time) for the active clock.
+
+    enabled=True (default): world-clock mode; reference is
+    world_clock.current_time (None when unset).
+    enabled=False: real-clock mode; the world clock is off and the reference
+    falls back to today's real date (YYYY-MM-DD).
+    """
+    clock = _load().get("world_clock", {}) or {}
+    enabled = clock.get("enabled", True) is not False
+    if enabled:
+        return True, clock.get("current_time")
+    from datetime import datetime
+    return False, datetime.now().strftime("%Y-%m-%d")
 
 
 def get_all_boot_uris() -> dict[str, list[str]]:

@@ -520,11 +520,11 @@ async def remember_memory(uri: str, content: str, time: Optional[str] = None, ch
                 parent_path = ""
                 title = full_path
 
-            # Handle world time parsing
+            # Handle world time parsing (real-clock mode when world clock disabled)
             final_world_time = None
             config = get_config()
             clock = config.get("world_clock", {})
-            current_world_time = clock.get("current_time")
+            _, current_world_time = _cfg.get_clock_state()
 
             if time:
                 from system_views import parse_relative_offset
@@ -632,7 +632,7 @@ async def remember_child_memory(
             final_world_time = None
             config = get_config()
             clock = config.get("world_clock", {})
-            current_world_time = clock.get("current_time")
+            _, current_world_time = _cfg.get_clock_state()
 
             if time:
                 from system_views import parse_relative_offset
@@ -741,7 +741,7 @@ async def edit_memory(
     if time:
         config = get_config()
         clock = config.get("world_clock", {})
-        current_world_time = clock.get("current_time")
+        _, current_world_time = _cfg.get_clock_state()
         from system_views import parse_relative_offset
         offset_date = parse_relative_offset(time, current_world_time)
         final_world_time = offset_date or time
@@ -1434,7 +1434,7 @@ async def archive_memory(
             # --- 世界时间处理 ---
             config = get_config()
             clock = config.get("world_clock", {})
-            current_world_time = clock.get("current_time")
+            _, current_world_time = _cfg.get_clock_state()
 
             final_world_time = None
             if time:
