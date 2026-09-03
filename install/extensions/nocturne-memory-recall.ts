@@ -34,6 +34,9 @@ const DB_PATH = resolveDbPath();
 const EMBEDDING_MODEL = "BAAI/bge-large-zh-v1.5";
 const EMBEDDING_API_URL = "https://api.siliconflow.cn/v1";
 const EMBEDDING_API_KEY = process.env.NOCTURNE_EMBEDDING_API_KEY ?? "";
+// Official query instruction for bge-*-zh-v1.5 retrieval (BAAI README):
+// prepend to SHORT QUERIES only, never to passages/documents.
+const QUERY_INSTRUCTION = "为这个句子生成表示以用于检索相关文章：";
 
 // Vector cache location (next to source DB, not in pi agent dir)
 const CACHE_DIR = join(dirname(DB_PATH), "recall-cache");
@@ -42,7 +45,20 @@ const CACHE_PATH = join(CACHE_DIR, "embeddings.sqlite");
 // Recall tuning
 const TOP_K = 3;
 const MIN_SCORE = 0.35;
+// Anchor threshold: the top-ranked item only earns "高度相关，建议读取"
+// when its absolute score clears this bar. Priority (max 0.15) plus recency
+// (max 0.08) cannot reach it alone — semantic relevance must contribute.
+const HIGH_CONFIDENCE = 0.55;
+// doc-coverage keyword normalization alignment gain (see keywordScore).
+const DOC_COVERAGE_GAIN = 1.4;
 const MAX_SUMMARY_LEN = 80;
+
+// Query-vector cache TTL. Re-used prompts (/pi, /reroll, /tree + resend) hit
+// this cache and skip the embed API call entirely. A query's embedding is a
+// pure function of its text for a fixed model, so the only reason to expire
+// is to bound cache growth and flush vectors from a retired model. 7 days
+// covers same-day rerolls and any model swap within a week.
+const QUERY_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 // BAAI/bge-large-zh-v1.5 max sequence is 512 tokens; ~1 zh char per token.
 // Truncate embedding inputs so long memories don't 400 the whole batch.
@@ -51,10 +67,11 @@ const MAX_SUMMARY_LEN = 80;
 const EMBED_INPUT_MAX = 500;
 const EMBED_CHUNK_OVERLAP = 80;
 
-// Scoring weights (aligned with omp mnemopi hybrid recall)
-const W_VECTOR = 0.5;
+// Scoring weights (hybrid). Priority follows the graph's semantic:
+// importance 0 = most important -> prio score 1.0; 10 = trivia -> 0.0.
+const W_VECTOR = 0.55;
 const W_KEYWORD = 0.3;
-const W_PRIORITY = 0.2;
+const W_PRIORITY = 0.15;
 
 interface SearchDoc {
 	uri: string;
@@ -155,12 +172,12 @@ function loadSearchDocuments(db: DatabaseSync, namespace: string): SearchDoc[] {
 		}));
 }
 
-function firstLineSummary(content: string): string {
-	const first = content
-		.split(/\n+/)
-		.map((s) => s.trim())
-		.find((s) => s.length > 0) ?? "";
-	return first.length > MAX_SUMMARY_LEN ? `${first.slice(0, MAX_SUMMARY_LEN)}……` : first;
+/** Flatten all line breaks and take the first MAX_SUMMARY_LEN chars, so an
+ *  early line break (e.g. a short markdown title) cannot truncate the
+ *  excerpt to just the heading. */
+function summarize(content: string): string {
+	const flat = content.replace(/\r?\n+/g, " ").trim();
+	return flat.length > MAX_SUMMARY_LEN ? `${flat.slice(0, MAX_SUMMARY_LEN)}……` : flat;
 }
 
 // Chunk text into overlapping segments of EMBED_INPUT_MAX chars. Overlap keeps
@@ -235,13 +252,23 @@ function tokenizeForMatch(text: string): string[] {
 
 function keywordScore(queryTokens: string[], doc: SearchDoc): number {
 	if (queryTokens.length === 0) return 0;
-	const docTokens = new Set(tokenizeForMatch(`${doc.uri} ${doc.disclosure} ${doc.content}`));
+	const docTokens = tokenizeForMatch(`${doc.uri} ${doc.disclosure} ${doc.searchTerms} ${doc.content}`);
+	const docTokenSet = new Set(docTokens);
 	let hits = 0;
-	for (const t of queryTokens) if (docTokens.has(t)) hits++;
-	return hits / queryTokens.length;
+	for (const t of queryTokens) if (docTokenSet.has(t)) hits++;
+	// Two complementary normalizations, max wins:
+	// - query-precision: share of query tokens the doc matches. Right metric
+	//   for short prompts, but a long Prior-context query dilutes it.
+	// - doc-coverage: share of doc tokens the query mentions. Catches "the
+	//   context talks about this doc" regardless of context length. Saturates
+	//   lower than query-precision (a doc is rarely >80% covered), so align
+	//   scales with DOC_COVERAGE_GAIN before comparing.
+	let covered = 0;
+	for (const t of docTokenSet) if (queryTokens.includes(t)) covered++;
+	const byQuery = hits / queryTokens.length;
+	const byDoc = docTokens.length > 0 ? Math.min(1, (covered / docTokens.length) * DOC_COVERAGE_GAIN) : 0;
+	return Math.max(byQuery, byDoc);
 }
-
-// ── Vector cache (node:sqlite) ─────────────────────────────────────────────
 
 class VectorCache {
 	private db: DatabaseSync | null = null;
@@ -284,6 +311,20 @@ class VectorCache {
 				)
 			`);
 		}
+		// Query-vector cache: one row per exact query string (md5 key). This is
+		// the re-embed fast path for repeated prompts; unlike doc vectors it
+		// needs no content_hash (the query text IS the key) — TTL handles aging.
+		this.db.exec(`
+			CREATE TABLE IF NOT EXISTS query_embeddings (
+				query TEXT NOT NULL,
+				query_hash TEXT PRIMARY KEY,
+				vector TEXT NOT NULL,
+				updated_at INTEGER NOT NULL
+			)
+		`);
+		this.db
+			.prepare("DELETE FROM query_embeddings WHERE updated_at < ?")
+			.run(nowMs() - QUERY_CACHE_TTL_MS);
 	}
 
 	private get _db(): DatabaseSync {
@@ -364,6 +405,60 @@ class VectorCache {
 		}
 	}
 
+	/** Join cached query vectors for the given query strings, in order.
+	 *  Missing/expired entries are null so callers only embed the gaps. */
+	getQueryVectors(queries: string[]): (Float32Array | null)[] {
+		const out: (Float32Array | null)[] = new Array(queries.length).fill(null);
+		if (queries.length === 0) return out;
+		try {
+			const hashes = queries.map(md5);
+			const stmt = this._db.prepare(
+				"SELECT query_hash, vector FROM query_embeddings WHERE query_hash = ? AND updated_at >= ?",
+			);
+			// Pruned once per open() (see TTL cleanup there); belt-and-suspenders
+			// freshness check keeps an aged row (opened pre-cleanup) out of use.
+			const cutoff = nowMs() - QUERY_CACHE_TTL_MS;
+			for (let i = 0; i < queries.length; i++) {
+				const row = stmt.get(hashes[i], cutoff) as
+					| { vector: string }
+					| undefined;
+				if (row) {
+					try {
+						out[i] = Float32Array.from(JSON.parse(row.vector) as number[]);
+					} catch {
+						out[i] = null;
+					}
+				}
+			}
+		} catch {
+			// cache read failure => treat as all-miss
+		}
+		return out;
+	}
+
+	/** Upsert query vectors; `vectors` parallel to `queries` (may be sparse). */
+	saveQueryVectors(queries: string[], vectors: (Float32Array | null)[]): void {
+		if (!this.db) return;
+		const stmt = this._db.prepare(
+			`INSERT INTO query_embeddings (query, query_hash, vector, updated_at)
+			 VALUES (?, ?, ?, ?)
+			 ON CONFLICT(query_hash) DO UPDATE SET
+			   query=excluded.query, vector=excluded.vector, updated_at=excluded.updated_at`,
+		);
+		const t = nowMs();
+		this._db.exec("BEGIN");
+		try {
+			for (let i = 0; i < queries.length; i++) {
+				const v = vectors[i];
+				if (!v) continue;
+				stmt.run(queries[i], md5(queries[i]), JSON.stringify([...v]), t);
+			}
+			this._db.exec("COMMIT");
+		} catch {
+			this._db.exec("ROLLBACK");
+		}
+	}
+
 	close(): void {
 		this.db?.close();
 		this.db = null;
@@ -376,6 +471,9 @@ interface RecalledItem {
 	uri: string;
 	disclosure: string;
 	summary: string;
+	/** Full content: the dedup hash is version-sensitive, so it must cover
+	 *  the whole body, not just the first-line summary. */
+	content: string;
 	score: number;
 	kw: number;
 }
@@ -416,13 +514,21 @@ function toEpochDays(ts: string | null): number | null {
 	return Math.floor(ms / 86400000);
 }
 
+function priorityScore(priority: number): number {
+	// Graph semantic: 0 = most important, 10 = trivia (see remember_child_memory).
+	// Map to 1.0..0.0 with clamping; out-of-range values never get a boost.
+	const p = Math.min(Math.max(priority, 0), 10);
+	return 1 - p / 10;
+}
+
 function recencyBoost(docTs: string | null, nowDays: number): number {
 	const days = toEpochDays(docTs);
 	if (days == null) return 0;
 	const delta = nowDays - days;
-	if (delta < 0) return 0.05; // future-dated entries get a tiny boost
-	if (delta <= 7) return 0.05; // very recent world events
-	if (delta <= 30) return 0.02;
+	if (delta < 0) return 0.08; // future-dated entries get the recent-tier boost
+	if (delta <= 7) return 0.08; // very recent world events
+	if (delta <= 30) return 0.04;
+	if (delta <= 90) return 0.02;
 	return 0;
 }
 
@@ -434,9 +540,14 @@ function cosine(a: Float32Array, b: Float32Array): number {
 }
 
 async function recall(
-	query: string,
+	queries: string[],
 	namespace: string,
 ): Promise<{ items: RecalledItem[]; mode: "vector" | "keyword" }> {
+	// Multi-query recall: each query is scored independently and the per-doc
+	// best wins. Query[0] is the current prompt (retrieval intent); any
+	// following queries are conversation context (declarative text) — only
+	// the intent query carries the BGE instruction.
+	if (queries.length === 0) return { items: [], mode: "keyword" };
 	// Open nocturne DB read-only
 	if (!existsSync(DB_PATH)) return { items: [], mode: "keyword" };
 	const db = new DatabaseSync(DB_PATH, { readOnly: true });
@@ -455,13 +566,13 @@ async function recall(
 		}
 		const pool = [...byUri.values()];
 
-		const queryTokens = tokenizeForMatch(query);
+		const queryTokensList = queries.map(tokenizeForMatch);
 
 		// Vector scoring (with cache)
 		const cache = new VectorCache();
 		let mode: "vector" | "keyword" = "keyword";
 		let vecScores = new Map<string, number>();
-		let queryVec: Float32Array | null = null;
+		let queryVecs: Float32Array[] = [];
 		try {
 			const cached = cache.loadValid(namespace, pool);
 			const missing = pool.filter((d) => !cached.has(d.uri));
@@ -470,7 +581,7 @@ async function recall(
 			for (const d of missing) {
 				segByUri.set(
 					d.uri,
-					chunkText(`${d.uri}\n${d.disclosure}\n${d.content}`, EMBED_INPUT_MAX, EMBED_CHUNK_OVERLAP),
+					chunkText(`${d.uri}\n${d.disclosure}\n${d.searchTerms}\n${d.content}`, EMBED_INPUT_MAX, EMBED_CHUNK_OVERLAP),
 				);
 			}
 			const segTexts = [...segByUri.values()].flat();
@@ -487,19 +598,40 @@ async function recall(
 					}
 				}
 			}
-			const qv = await embed([query.slice(0, EMBED_INPUT_MAX)]);
-			if (qv && qv.length === 1) queryVec = qv[0];
-			if (queryVec) {
+			// Query vectors: cache by the EXACT embed input (instruction-prefixed
+			// for the intent query, truncated for all). Repeated prompts (/pi,
+			// /reroll, /tree + resend) hit the cache and skip the embed API call.
+			// The doc scoring below still runs live, so semantic freshness is
+			// never traded away — only the network round-trip is saved.
+			const embedInputs = queries.map((q, i) =>
+				i === 0 ? `${QUERY_INSTRUCTION}${q.slice(0, EMBED_INPUT_MAX - QUERY_INSTRUCTION.length)}` : q.slice(0, EMBED_INPUT_MAX),
+			);
+			const cachedQ = cache.getQueryVectors(embedInputs);
+			const missIdx: number[] = [];
+			for (let i = 0; i < cachedQ.length; i++) if (!cachedQ[i]) missIdx.push(i);
+			if (missIdx.length > 0) {
+				const missedInputs = missIdx.map((i) => embedInputs[i]);
+				const qvs = await embed(missedInputs);
+				if (qvs) {
+					cache.saveQueryVectors(missedInputs, qvs);
+					for (let j = 0; j < missIdx.length; j++) cachedQ[missIdx[j]] = qvs[j];
+				}
+			}
+			queryVecs = cachedQ.filter((v): v is Float32Array => v !== null);
+			if (queryVecs.length === queries.length) {
 				mode = "vector";
 				for (const d of pool) {
 					const segs = cached.get(d.uri);
 					if (!segs || segs.length === 0) continue;
-					// Segment-level cosine, take the max: any strongly matching
-					// segment justifies recalling the memory.
+					// Per query: segment-level cosine, take the max segment.
+					// Across queries: take the best query — any query view
+					// (intent or context) justifies recalling the memory.
 					let best = 0;
-					for (const v of segs) {
-						const c = cosine(queryVec, v);
-						if (c > best) best = c;
+					for (const queryVec of queryVecs) {
+						for (const v of segs) {
+							const c = cosine(queryVec, v);
+							if (c > best) best = c;
+						}
 					}
 					vecScores.set(d.uri, best);
 				}
@@ -510,18 +642,22 @@ async function recall(
 			cache.close();
 		}
 
-		// Hybrid scoring
-		const maxPriority = Math.max(...pool.map((d) => d.priority), 1);
+		// Hybrid scoring — per-query keyword score, best query wins.
 		const scored: RecalledItem[] = pool.map((doc) => {
 			const vec = mode === "vector" ? (vecScores.get(doc.uri) ?? 0) : 0;
-			const kw = keywordScore(queryTokens, doc);
-			const prio = doc.priority / maxPriority;
+			let kw = 0;
+			for (const qTokens of queryTokensList) {
+				const k = keywordScore(qTokens, doc);
+				if (k > kw) kw = k;
+			}
+			const prio = priorityScore(doc.priority);
 			let score = W_VECTOR * vec + W_KEYWORD * kw + W_PRIORITY * prio;
 			score += recencyBoost(doc.worldTimestamp, nowDays);
 			return {
 				uri: doc.uri,
 				disclosure: doc.disclosure,
-				summary: firstLineSummary(doc.content),
+				summary: summarize(doc.content),
+				content: doc.content,
 				score,
 				kw,
 			};
@@ -545,13 +681,13 @@ async function recall(
 function buildMemoriesBlock(items: RecalledItem[]): string {
 	const lines: string[] = ["<memories>"];
 	items.forEach((item, i) => {
-		const anchor = i === 0 ? " [高度相关，建议读取]" : "";
+		const anchor = i === 0 && item.score >= HIGH_CONFIDENCE ? " [高度相关，建议读取]" : "";
 		lines.push(`\n${i + 1}. ${item.uri}${anchor}`);
 		if (item.disclosure) lines.push(`   想起条件: ${item.disclosure}`);
 		lines.push(`   摘要: ${item.summary}`);
 	});
 	lines.push(
-		"\n当某条想起条件与当前对话明显相关时，应当主动 browse_memory 读取原文。",
+		"\n如果你想起了什么，主动用 browse_memory 读取原文试试吧。",
 		"</memories>",
 	);
 	return lines.join("\n");
@@ -568,25 +704,20 @@ export default function nocturneMemoryRecallExtension(pi: ExtensionAPI): void {
 	});
 
 	// Session-level dedup: uri -> content hash of the last injected version.
-	// Survives process restarts by rebuilding from session entries (only the
-	// stretch after the last compaction - earlier injections are out of
-	// context and may be re-injected).
+	// Rebuilt from the session's ACTIVE tree path (buildContextEntries walks
+	// from the current leaf, so entries abandoned by /tree rollback do not
+	// count as injected), restricted to what is actually in the LLM context:
+	// the compaction-aware entry list. Rebuilt on every prompt so /tree,
+	// /resume, /fork and compaction all stay consistent; the walk is cheap
+	// (O(entries on path)) and recall() already dwarfs it. The framework
+	// persists each returned message to the session before the next prompt,
+	// so the session is the single source of truth for dedup state.
 	const injected = new Map<string, string>();
 
 	function rebuildInjectedFromSession(ctx: ExtensionContext): void {
 		injected.clear();
-		const entries = ctx.sessionManager.getEntries();
-		// Skip everything up to and including the last compaction: those
-		// injections are no longer in the LLM context.
-		let start = 0;
-		for (let i = entries.length - 1; i >= 0; i--) {
-			if (entries[i].type === "compaction") {
-				start = i + 1;
-				break;
-			}
-		}
-		for (let i = start; i < entries.length; i++) {
-			const e = entries[i];
+		const entries = ctx.sessionManager.buildContextEntries();
+		for (const e of entries) {
 			if (e.type !== "custom_message" || e.customType !== "rp-memories") continue;
 			const details = e.details as { ids?: string[]; hashes?: Record<string, string> } | undefined;
 			if (details?.hashes) {
@@ -605,17 +736,23 @@ export default function nocturneMemoryRecallExtension(pi: ExtensionAPI): void {
 		rebuildInjectedFromSession(ctx);
 	});
 
-	pi.on("session_compact", () => {
-		injected.clear();
+	pi.on("session_tree", (_event, ctx) => {
+		// Leaf moved (/tree navigation, rollback): the active path changed,
+		// so the injected set must be rebuilt from the new path.
+		rebuildInjectedFromSession(ctx);
+	});
+
+	pi.on("session_compact", (_event, ctx) => {
+		// Compaction may keep recent injections in context (firstKeptEntryId);
+		// rebuild instead of clearing so kept entries stay deduped.
+		rebuildInjectedFromSession(ctx);
 	});
 
 	pi.on("before_agent_start", async (event: BeforeAgentStartEvent, ctx: ExtensionContext) => {
-		// Rebuild once per session on first prompt (covers --resume/--fork
-		// paths that may not fire session_start before agent starts).
-		if (!injectedReady) {
-			rebuildInjectedFromSession(ctx);
-			injectedReady = true;
-		}
+		// Rebuild on every prompt: the active path may have changed via
+		// /tree, /resume, /fork or compaction between prompts. This also
+		// covers --resume paths that never fire session_start.
+		rebuildInjectedFromSession(ctx);
 
 		// Skip slash-command expansions and empty prompts
 		const prompt = event.prompt?.trim();
@@ -624,21 +761,54 @@ export default function nocturneMemoryRecallExtension(pi: ExtensionAPI): void {
 		const namespace = detectNamespace();
 		if (!namespace) return;
 
-		const { items, mode } = await recall(prompt, namespace);
+		// Dual-query recall: [current prompt, conversation context]. The
+		// context view uses recent message turns so referential/elliptical
+		// prompts ("然后呢？", "里面有什么？") can still retrieve. Message
+		// entries carry our own rp-memories injections as plain text — those
+		// must not retrieve memories (no self-excitation), so they are
+		// identified by the <memories> block and skipped.
+		const queries: string[] = [prompt];
+		try {
+			const entries = ctx.sessionManager.buildContextEntries();
+			const msgs: string[] = [];
+			for (let i = entries.length - 1; i >= 0 && msgs.length < 6; i--) {
+				const e = entries[i] as { type?: string; message?: { role?: string; content?: unknown } };
+				if (e.type !== "message" || !e.message || typeof e.message.role !== "string") continue;
+				const content = e.message.content;
+				const text =
+					typeof content === "string"
+						? content
+						: Array.isArray(content)
+							? content
+									.map((b: { text?: string }) => (typeof b?.text === "string" ? b.text : ""))
+									.join(" ")
+									.trim()
+							: "";
+				if (!text || text.includes("<memories>")) continue;
+				msgs.unshift(`${e.message.role}: ${text}`);
+			}
+			if (msgs.length > 0) queries.push(`Prior context:\n${msgs.join("\n")}`);
+		} catch {
+			// No usable history (fresh session / harness): prompt-only recall.
+		}
+
+		const { items, mode } = await recall(queries, namespace);
 		if (items.length === 0) return;
 
-		// Dedup against previously injected (same content version)
+		// Dedup against previously injected (same content version). The hash
+		// covers the FULL body: a content edit must invalidate the marker so
+		// the updated memory gets re-injected.
 		const fresh: RecalledItem[] = [];
 		const hashes: Record<string, string> = {};
 		for (const it of items) {
-			const hash = md5(`${it.uri}|${it.summary}`);
+			const hash = md5(`${it.uri}|${it.content}`);
 			if (injected.get(it.uri) === hash) continue;
 			fresh.push(it);
 			hashes[it.uri] = hash;
 		}
 		if (fresh.length === 0) return;
 
-		for (const it of fresh) injected.set(it.uri, md5(`${it.uri}|${it.summary}`));
+		for (const it of fresh) injected.set(it.uri, hashes[it.uri]);
 
 		const content = buildMemoriesBlock(fresh);
 
@@ -663,6 +833,4 @@ export default function nocturneMemoryRecallExtension(pi: ExtensionAPI): void {
 			}
 		},
 	});
-
-	let injectedReady = false;
 }

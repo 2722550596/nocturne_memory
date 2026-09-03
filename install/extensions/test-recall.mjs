@@ -21,6 +21,7 @@ const TOP_K = 5;
 const MIN_SCORE = 0.35;
 const EMBED_INPUT_MAX = 500;
 const EMBED_CHUNK_OVERLAP = 80;
+const QUERY_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const W_VECTOR = 0.5;
 const W_KEYWORD = 0.3;
 const W_PRIORITY = 0.2;
@@ -220,6 +221,15 @@ class VectorCache {
 				)
 			`);
 		}
+		this.db.exec(`
+			CREATE TABLE IF NOT EXISTS query_embeddings (
+				query TEXT NOT NULL,
+				query_hash TEXT PRIMARY KEY,
+				vector TEXT NOT NULL,
+				updated_at INTEGER NOT NULL
+			)
+		`);
+		this.db.prepare("DELETE FROM query_embeddings WHERE updated_at < ?").run(Date.now() - QUERY_CACHE_TTL_MS);
 	}
 	loadValid(docs) {
 		const map = new Map();
@@ -268,6 +278,48 @@ class VectorCache {
 			const del = this.db.prepare("DELETE FROM embeddings WHERE uri = ?");
 			for (const { uri } of all) {
 				if (!seen.has(uri)) del.run(uri);
+			}
+			this.db.exec("COMMIT");
+		} catch {
+			this.db.exec("ROLLBACK");
+		}
+	}
+	getQueryVectors(queries) {
+		const out = new Array(queries.length).fill(null);
+		if (queries.length === 0) return out;
+		try {
+			const hashes = queries.map(md5);
+			const stmt = this.db.prepare(
+				"SELECT query_hash, vector FROM query_embeddings WHERE query_hash = ? AND updated_at >= ?",
+			);
+			const cutoff = Date.now() - QUERY_CACHE_TTL_MS;
+			for (let i = 0; i < queries.length; i++) {
+				const row = stmt.get(hashes[i], cutoff);
+				if (row) {
+					try {
+						out[i] = Float32Array.from(JSON.parse(row.vector));
+					} catch {
+						out[i] = null;
+					}
+				}
+			}
+		} catch {}
+		return out;
+	}
+	saveQueryVectors(queries, vectors) {
+		const stmt = this.db.prepare(
+			`INSERT INTO query_embeddings (query, query_hash, vector, updated_at)
+			 VALUES (?, ?, ?, ?)
+			 ON CONFLICT(query_hash) DO UPDATE SET
+			   query=excluded.query, vector=excluded.vector, updated_at=excluded.updated_at`,
+		);
+		const t = Date.now();
+		this.db.exec("BEGIN");
+		try {
+			for (let i = 0; i < queries.length; i++) {
+				const v = vectors[i];
+				if (!v) continue;
+				stmt.run(queries[i], md5(queries[i]), JSON.stringify([...v]), t);
 			}
 			this.db.exec("COMMIT");
 		} catch {
@@ -325,8 +377,18 @@ async function recall(query, namespace, cachePath) {
 					}
 				}
 			}
-			const qv = await embed([query.slice(0, EMBED_INPUT_MAX)]);
-			if (qv && qv.length === 1) queryVec = qv[0];
+			// Query-vector cache: repeated queries skip the embed API call.
+			const embedInput = query.slice(0, EMBED_INPUT_MAX);
+			const [cachedQv] = cache.getQueryVectors([embedInput]);
+			if (cachedQv) {
+				queryVec = cachedQv;
+			} else {
+				const qv = await embed([embedInput]);
+				if (qv && qv.length === 1) {
+					queryVec = qv[0];
+					cache.saveQueryVectors([embedInput], [queryVec]);
+				}
+			}
 			if (queryVec) {
 				mode = "vector";
 				for (const d of pool) {
@@ -478,6 +540,60 @@ console.log("8. cache schema migration (legacy single-vector layout)");
 	check("legacy rows dropped after migration", n === 0);
 	vc.db.close();
 	try { rmSync(migPath); } catch {}
+}
+
+console.log("9. query-vector cache (repeated prompt skips embed)");
+{
+	const qPath = join(CACHE_DIR, "querycache-test.sqlite");
+	const tq = new VectorCache(qPath);
+	const qCacheKey = "明月提到的那个和我一样被创造出来的朋友";
+	const before0 = tq.db.prepare("SELECT COUNT(*) c FROM query_embeddings").get().c;
+	const em = await embed([qCacheKey]);
+	check("fresh embed produced a vector", !!em && em.length === 1);
+	if (em && em.length === 1) tq.saveQueryVectors([qCacheKey], [em[0]]);
+	const after = tq.db.prepare("SELECT COUNT(*) c FROM query_embeddings").get().c;
+	check(`query row saved (${before0} -> ${after})`, after === before0 + 1);
+	// Second read must hit the cache.
+	const [hit] = tq.getQueryVectors([qCacheKey]);
+	check("query vector hit from cache", !!hit, "got null");
+	if (hit) {
+		let close = true;
+		for (let i = 0; i < hit.length && close; i++) if (hit[i] !== em[0][i]) close = false;
+		check("cached vector matches embedded (normalized)", close);
+	}
+	// Unknown query -> miss.
+	const [miss] = tq.getQueryVectors(["一个从未出现过的查询词该miss掉？？？"]);
+	check("unknown query -> cache miss", miss === null);
+	// TTL expiry drops the row.
+	tq.db.prepare("UPDATE query_embeddings SET updated_at = ? WHERE query = ?").run(
+		Date.now() - QUERY_CACHE_TTL_MS - 1000, qCacheKey,
+	);
+	const [expired] = tq.getQueryVectors([qCacheKey]);
+	check("expired query row -> cache miss", expired === null);
+	tq.db.close();
+	try { rmSync(qPath); } catch {}
+
+	// End-to-end: second recall for the SAME query reuses cached query vector.
+	const tQ1 = Date.now();
+	const rq1 = await recall(qCacheKey, "luzhou", join(CACHE_DIR, "querycache-e2e.sqlite"));
+	const eQ1 = Date.now() - tQ1;
+	const tQ2 = Date.now();
+	const rq2 = await recall(qCacheKey, "luzhou", join(CACHE_DIR, "querycache-e2e.sqlite"));
+	const eQ2 = Date.now() - tQ2;
+	check("both end-to-end recalls mode=vector", rq1.mode === "vector" && rq2.mode === "vector");
+	check(
+		`second recall faster (${(eQ1 / 1000).toFixed(1)}s -> ${(eQ2 / 1000).toFixed(1)}s)`,
+		eQ2 < eQ1 / 2 || eQ2 < 3000,
+	);
+	const cache2 = new VectorCache(join(CACHE_DIR, "querycache-e2e.sqlite"));
+	const rows2 = cache2.db.prepare("SELECT COUNT(*) c FROM query_embeddings").get().c;
+	check("query cache row persisted across recall calls", rows2 >= 1);
+	cache2.db.close();
+	try {
+		rmSync(join(CACHE_DIR, "querycache-e2e.sqlite"));
+		rmSync(join(CACHE_DIR, "querycache-e2e.sqlite-shm"));
+		rmSync(join(CACHE_DIR, "querycache-e2e.sqlite-wal"));
+	} catch {}
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);
