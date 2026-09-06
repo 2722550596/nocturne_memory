@@ -444,10 +444,79 @@ class GraphService:
                         "disclosure": edge.disclosure,
                         "content": memory.content,
                         "created_at": memory.created_at.isoformat() if memory.created_at else "",
+                        "world_timestamp": memory.world_timestamp,
+                        "parent_uuid": edge.parent_uuid,
+                        "edge_name": edge.name,
                     }
                 )
 
             return paths
+
+    async def get_forgotten_nodes(
+        self,
+        namespace: str = "",
+        domain: Optional[str] = None,
+        limit: int = 10,
+    ) -> List[Dict[str, Any]]:
+        """
+        Get the longest-unaccessed memory nodes (system://forgotten).
+
+        "Effective" last access mirrors get_diagnostics: nodes with a
+        last_accessed_at use it; nodes without one fall back to created_at
+        (never-accessed = dormant since birth). Deduplicated by node, best
+        (lowest-priority-number) path wins. Sorted by dormancy descending.
+        """
+        from datetime import datetime
+
+        async with self.session() as session:
+            stmt = (
+                select(Path, Node, Edge, Memory)
+                .select_from(Path)
+                .join(Edge, Path.edge_id == Edge.id)
+                .join(Node, Node.uuid == Edge.child_uuid)
+                .join(
+                    Memory,
+                    and_(Memory.node_uuid == Node.uuid, Memory.deprecated == False),
+                )
+                .where(Path.namespace == namespace)
+                .where(Node.uuid != ROOT_NODE_UUID)
+            )
+            if domain:
+                stmt = stmt.where(Path.domain == domain)
+
+            result = await session.execute(stmt)
+            now = datetime.now()
+
+            # node_uuid -> entry; lower priority number wins on ties
+            by_node: Dict[str, Dict[str, Any]] = {}
+            for path_obj, node, edge, memory in result.all():
+                last = node.last_accessed_at or node.created_at or now
+                dormant_days = round((now - last).total_seconds() / 86400.0, 1)
+                prio = edge.priority if edge.priority is not None else 999
+
+                existing = by_node.get(node.uuid)
+                if existing is not None and existing["priority"] <= prio:
+                    continue
+
+                by_node[node.uuid] = {
+                    "uuid": node.uuid,
+                    "uri": f"{path_obj.domain}://{path_obj.path}",
+                    "priority": edge.priority,
+                    "dormant_days": dormant_days,
+                    "last_accessed_at": node.last_accessed_at.isoformat()
+                    if node.last_accessed_at
+                    else None,
+                    "created_at": node.created_at.isoformat()
+                    if node.created_at
+                    else None,
+                    "snippet": memory.content[:80],
+                }
+
+            ranked = sorted(
+                by_node.values(),
+                key=lambda e: (-e["dormant_days"], e["priority"] or 999, e["uri"]),
+            )
+            return ranked[:limit]
 
     async def get_diagnostics(self, namespace: str = "", days_stale: int = 30, max_children: int = 10, priority_thresholds: Dict[int, int] = None, domain: str = None) -> Dict[str, Any]:
         """

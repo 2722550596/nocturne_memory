@@ -443,6 +443,121 @@ async def generate_glossary_index_view() -> str:
         return t("system.error_glossary").format(error=str(e))
 
 
+
+async def generate_timeline_view(domain: Optional[str] = None, limit: int = 10, since: Optional[str] = None) -> str:
+    """Generate a story-time timeline view (system://timeline/<domain>/<N>).
+
+    Unlike system://recent (ordered by modification time), this orders
+    memories by their world_timestamp — the in-story calendar — so the
+    character reads "what happened, in story order".
+    """
+    from mcp_server import DEFAULT_DOMAIN
+    graph = get_graph_service()
+
+    try:
+        paths = await graph.get_all_paths(domain=domain, namespace=get_namespace())
+
+        # Node-centric: dedupe by node_uuid (aliases collapse to one entry).
+        by_node: Dict[str, Dict[str, Any]] = {}
+        for item in paths:
+            ts = item.get("world_timestamp")
+            if not ts:
+                continue
+            nid = item.get("node_uuid", "")
+            existing = by_node.get(nid)
+            if existing is not None and existing["priority"] <= item.get("priority", 999):
+                continue
+            by_node[nid] = item
+
+        entries = sorted(
+            by_node.values(),
+            key=lambda x: x.get("world_timestamp") or "",
+            reverse=True,
+        )
+
+        if since:
+            entries = [e for e in entries if (e.get("world_timestamp") or "") >= since]
+
+        entries = entries[:limit]
+
+        lines = [
+            "# 世界时间轴 (Timeline)",
+            f"> 领域: {domain if domain else '全部'}",
+            f"> 条目: {len(entries)} 条（按世界时间倒序）",
+        ]
+        if since:
+            lines.append(f"> 起始日期: {since}")
+        lines.append("")
+
+        if not entries:
+            lines.append("(没有带世界时间的记忆。)")
+            return "\n".join(lines)
+
+        for e in entries:
+            uri = e.get("uri", "")
+            ts = e.get("world_timestamp", "")
+            prio = e.get("priority", 5)
+            imp_str = f" [\u2605{prio}]"
+            disclosure = e.get("disclosure")
+            disc_str = f" ({disclosure})" if disclosure else ""
+            snippet = (e.get("content") or "").replace("\n", " ").strip()
+            if len(snippet) > 120:
+                snippet = snippet[:120] + "..."
+            lines.append(f"- {ts} | {uri}{imp_str}{disc_str}")
+            if snippet:
+                lines.append(f"  {snippet}")
+
+        return "\n".join(lines)
+
+    except Exception as e:
+        return t("system.error_recent").format(error=str(e))
+
+
+async def generate_forgotten_view(domain: Optional[str] = None, limit: int = 10) -> str:
+    """Generate a view of the longest-unaccessed memories (system://forgotten).
+
+    Helps the character notice which memories are "asleep": ranked by days
+    since last access (never-accessed nodes count from their creation).
+    """
+    from mcp_server import DEFAULT_DOMAIN
+    graph = get_graph_service()
+
+    try:
+        forgotten = await graph.get_forgotten_nodes(
+            namespace=get_namespace(),
+            domain=domain,
+            limit=limit,
+        )
+
+        lines = [
+            "# 沉睡记忆 (Forgotten)",
+            f"> 领域: {domain if domain else '全部'}",
+            f"> 条目: {len(forgotten)} 条（按沉睡天数倒序）",
+            "",
+        ]
+
+        if not forgotten:
+            lines.append("(没有沉睡的记忆——最近都有想起。)")
+            return "\n".join(lines)
+
+        for node in forgotten:
+            uri = node.get("uri", "")
+            days = node.get("dormant_days", 0)
+            prio = node.get("priority", 5)
+            imp_str = f" [\u2605{prio}]"
+            snippet = (node.get("snippet") or "").replace("\n", " ").strip()
+            lines.append(f"- {days} 天没想起 | {uri}{imp_str}")
+            if snippet:
+                lines.append(f"  {snippet}")
+
+        lines.append("")
+        lines.append("(这些记忆正在沉睡。browse_memory 可以唤醒它们。)")
+
+        return "\n".join(lines)
+
+    except Exception as e:
+        return t("system.error_recent").format(error=str(e))
+
 async def generate_wakeup_view(boot_uris: List[str], history_limit: int = 5) -> str:
     """Generate the system wakeup view (system://wakeup)."""
     graph = get_graph_service()
@@ -708,19 +823,63 @@ async def generate_memory_slot_view(slot_type: str, boot_uris: List[str] = None)
         if clock_enabled and curr_world_time:
             blocks.append(f"> 当前世界时间: {curr_world_time}")
 
+        # Single-pass render: one get_all_paths query carries content,
+        # disclosure, created_at and world_timestamp for every node, so the
+        # boot list assembles in memory. The previous per-URI loop paid
+        # get_memory_by_path + get_children per boot URI (~11ms each, ~0.4s
+        # for 37 URIs) on every slot render.
         if boot_uris:
+            all_paths = await graph.get_all_paths(namespace=ns)
+            by_uri: dict[str, dict] = {}
+            # Children keyed by the parent node's uuid (Edge.parent_uuid), the
+            # exact relation get_children used — a path-prefix approximation
+            # diverges when a child has cross-domain or non-prefixed aliases.
+            children_of: dict[str, list[dict]] = {}
+            for item in all_paths:
+                by_uri.setdefault(item["uri"], item)
+                if item.get("parent_uuid"):
+                    children_of.setdefault(item["parent_uuid"], []).append(item)
             for uri in boot_uris:
-                formatted = await _format_memory_clean(uri, ns, graph)
-                if formatted:
-                    blocks.append(formatted)
+                item = by_uri.get(uri)
+                if not item:
+                    continue
+                lines = [f"### {uri}"]
+                if curr_world_time and item.get("world_timestamp"):
+                    rel = calculate_relative_world_time(item["world_timestamp"], curr_world_time)
+                    if rel and config.get("world_clock", {}).get("show_relative", True) is not False:
+                        lines.append(f"> (发生于: {item['world_timestamp']}，{rel})")
+                    else:
+                        lines.append(f"> (发生于: {item['world_timestamp']})")
+                if item.get("disclosure"):
+                    lines.append(f"> 什么时候想起：{item['disclosure']}\n")
+                lines.append(item.get("content", ""))
+                lines.append("")
+                # Children rendered in the same order get_children produced:
+                # edge.priority asc, then edge.name.
+                children = sorted(
+                    children_of.get(item["node_uuid"], []),
+                    key=lambda c: (c.get("priority") or 0, c.get("edge_name") or ""),
+                )
+                for child in children:
+                    child_disc = child.get("disclosure")
+                    content = child.get("content") or ""
+                    snippet = (
+                        content[:100] + "..." if len(content) > 100 else content
+                    ).replace("\n", " ").strip()
+                    disc_str = f" ({child_disc})" if child_disc else ""
+                    snip_str = f" — {snippet}" if snippet else ""
+                    lines.append(f"- {child['uri']}{disc_str}{snip_str}")
+                if children:
+                    lines.append("")
+                blocks.append("\n".join(lines))
 
         recent_core = await _format_recent_core_index_clean(ns, graph, limit=5)
         if recent_core:
             blocks.append("## 最近动态\n" + "\n".join(recent_core))
-        
+
         # --- 增加去重逻辑 ---
         blocks = _deduplicate_boot_content(blocks, boot_uris)
-        
+
         return "\n\n---\n\n".join(blocks)
 
     elif slot_type == "history":

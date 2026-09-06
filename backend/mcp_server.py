@@ -55,6 +55,8 @@ from system_views import (
     generate_recent_memories_view,
     generate_glossary_index_view,
     generate_diagnostic_view,
+    generate_timeline_view,
+    generate_forgotten_view,
 )
 import contextlib
 from locales import t
@@ -512,8 +514,13 @@ async def browse_memory(uri: str, character_id: str = "", depth: int = 0, max_no
 
         特殊系统视图（不需要记忆也看得到）：
         - system://boot        : 醒来时最先看到的记忆
+        - system://wakeup/<N>  : boot 全文 + 最近动态 + 最近 N 个场景
         - system://index/<domain>: 查看某个域下的所有记忆索引（如 system://index/core）
         - system://recent/<N>  : 查看最近修改的 N 条记忆（如 system://recent/10）
+        - system://timeline/<domain>/<N>: 按世界时间（故事时间）倒序的事件轴，
+          如 system://timeline/history/10 或 system://timeline/2020-09-01（某日起全部）
+        - system://forgotten/<domain>/<N>: 沉睡最久的记忆——最久没想起的 N 条，
+          用来主动回顾快要遗忘的东西
         - system://glossary    : 所有触发词索引
     """
     try:
@@ -551,6 +558,34 @@ async def browse_memory(uri: str, character_id: str = "", depth: int = 0, max_no
                     limit = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 10
                     return await generate_recent_memories_view(limit)
 
+                elif cmd == "timeline":
+                    # system://timeline[/domain][/N|YYYY-MM-DD]
+                    # A bare date segment filters entries from that date on;
+                    # a digit-only segment is the entry limit.
+                    domain_arg = parts[1] if len(parts) > 1 else None
+                    extra = parts[2] if len(parts) > 2 else None
+                    limit = 10
+                    since = None
+                    if extra:
+                        if extra.isdigit():
+                            limit = int(extra)
+                        else:
+                            since = extra
+                    if domain_arg and "-" in domain_arg:
+                        # system://timeline/2020-09-01 — date without domain
+                        since = domain_arg
+                        domain_arg = None
+                    return await generate_timeline_view(
+                        domain=domain_arg, limit=limit, since=since
+                    )
+
+                elif cmd == "forgotten":
+                    domain_arg = parts[1] if len(parts) > 1 else None
+                    limit = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 10
+                    return await generate_forgotten_view(
+                        domain=domain_arg, limit=limit
+                    )
+
                 elif cmd == "glossary":
                     return await generate_glossary_index_view()
 
@@ -560,7 +595,7 @@ async def browse_memory(uri: str, character_id: str = "", depth: int = 0, max_no
                     return await generate_diagnostic_view(domain, days)
 
                 else:
-                    return f"未知的系统视图：{stripped}。试试 system://boot, system://wakeup, system://index/<domain>, system://recent/<N>, system://glossary, system://diagnostic/<domain>"
+                    return f"未知的系统视图：{stripped}。试试 system://boot, system://wakeup, system://index/<domain>, system://recent/<N>, system://timeline/<domain>/<N>, system://forgotten/<domain>/<N>, system://glossary, system://diagnostic/<domain>"
 
             # ── Normal memory lookup ───────────────────────────────────────
             return await fetch_and_format_memory(
