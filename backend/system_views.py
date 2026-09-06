@@ -452,7 +452,7 @@ async def generate_wakeup_view(boot_uris: List[str], history_limit: int = 5) -> 
     # 1. BOOT MEMORIES
     boot_blocks = []
     for uri in boot_uris:
-        formatted = await _format_memory_clean(uri, ns, graph, max_children=3)
+        formatted = await _format_memory_clean(uri, ns, graph)
         if formatted:
             boot_blocks.append(formatted)
     if boot_blocks:
@@ -479,7 +479,7 @@ async def generate_wakeup_view(boot_uris: List[str], history_limit: int = 5) -> 
     return "\n\n---\n\n".join(sections)
 
 
-async def _format_memory_clean(uri: str, ns: str, graph, max_children: int = 3) -> str:
+async def _format_memory_clean(uri: str, ns: str, graph) -> str:
     """Format one memory in clean style: ### uri, disclosure, content, children."""
     from mcp_server import parse_uri, make_uri, DEFAULT_DOMAIN, get_config
     domain, mem_path = parse_uri(uri)
@@ -519,25 +519,24 @@ async def _format_memory_clean(uri: str, ns: str, graph, max_children: int = 3) 
     lines.append(content)
     lines.append("")
     
-    # Children as snippets
-    if max_children > 0:
-        children = await graph.get_children(
-            detail.get("node_uuid"),
-            context_domain=domain,
-            context_path=mem_path,
-            namespace=ns,
-        )
-        if children:
-            for child in children[:max_children]:
-                child_domain = child.get("domain", domain)
-                child_path = child.get("path", "")
-                child_uri = make_uri(child_domain, child_path)
-                child_disc = child.get("disclosure")
-                snippet = (child.get("content_snippet") or "").replace("\n", " ").strip()
-                disc_str = f" ({child_disc})" if child_disc else ""
-                snip_str = f" — {snippet}" if snippet else ""
-                lines.append(f"- {child_uri}{disc_str}{snip_str}")
-            lines.append("")
+    # Children as snippets (all of them, no cap)
+    children = await graph.get_children(
+        detail.get("node_uuid"),
+        context_domain=domain,
+        context_path=mem_path,
+        namespace=ns,
+    )
+    if children:
+        for child in children:
+            child_domain = child.get("domain", domain)
+            child_path = child.get("path", "")
+            child_uri = make_uri(child_domain, child_path)
+            child_disc = child.get("disclosure")
+            snippet = (child.get("content_snippet") or "").replace("\n", " ").strip()
+            disc_str = f" ({child_disc})" if child_disc else ""
+            snip_str = f" — {snippet}" if snippet else ""
+            lines.append(f"- {child_uri}{disc_str}{snip_str}")
+        lines.append("")
     
     return "\n".join(lines)
 
@@ -711,7 +710,7 @@ async def generate_memory_slot_view(slot_type: str, boot_uris: List[str] = None)
 
         if boot_uris:
             for uri in boot_uris:
-                formatted = await _format_memory_clean(uri, ns, graph, max_children=3)
+                formatted = await _format_memory_clean(uri, ns, graph)
                 if formatted:
                     blocks.append(formatted)
 
