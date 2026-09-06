@@ -27,3 +27,5 @@ backups/
 
 # Sisyphus tooling artifacts
 .sisyphus/
+
+venv/
