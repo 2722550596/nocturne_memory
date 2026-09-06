@@ -22,15 +22,72 @@ import re
 from datetime import date
 
 
-async def fetch_and_format_memory(uri: str, track_access: bool = False) -> str:
+async def fetch_and_format_memory(
+    uri: str,
+    track_access: bool = False,
+    depth: int = 0,
+    max_nodes: int = 200,
+) -> str:
     """
     Fetch memory data and return a formatted string.
     Used by browse_memory tool and boot view.
+
+    Args:
+        uri: memory URI to fetch.
+        track_access: log an access event for analytics.
+        depth: how many levels of descendants to expand inline.
+            0  -> this node's full content + a list of direct-child URIs
+                  (the original behaviour; default).
+            1  -> this node + full content of its direct children.
+            N  -> recurse N levels deep.
+            -1 -> the entire subtree (unbounded depth).
+        max_nodes: hard cap on how many node bodies get rendered (subtree
+            mode). Once exceeded, further nodes list their URI only with an
+            "(omitted)" note instead of expanding content.
     """
     from mcp_server import parse_uri, make_uri, DEFAULT_DOMAIN, get_config
     graph = get_graph_service()
     glossary = get_glossary_service()
     domain, path = parse_uri(uri)
+
+    # Shared node budget so a huge subtree cannot blow up the response.
+    budget = [max(0, max_nodes)]
+
+    async def _render_subtree(d: str, p: str, remaining: int, indent: str) -> Optional[str]:
+        """Render one node (simplified) plus, if remaining != 0, its children.
+
+        remaining: 0 -> stop after this node; >0 -> recurse (remaining-1);
+        -1 -> recurse unbounded.
+        """
+        if budget[0] <= 0:
+            return f"{indent}■ {make_uri(d, p)} (内容省略：已达 max_nodes 上限)"
+        mem = await graph.get_memory_by_path(p, d, namespace=get_namespace())
+        if not mem:
+            return None
+        budget[0] -= 1
+        pad = indent + "  "
+        out: List[str] = [f"{indent}■ {make_uri(d, p)}"]
+        disc = mem.get("disclosure")
+        if disc:
+            out.append(f"{pad}(想起条件: {disc})")
+        content = mem.get("content", "(empty)")
+        for cl in content.split("\n"):
+            out.append(f"{pad}{cl}")
+        if remaining != 0:
+            kids = await graph.get_children(
+                mem["node_uuid"], context_domain=d, context_path=p,
+                namespace=get_namespace(),
+            )
+            for k in kids:
+                kd = k.get("domain", d)
+                kp = k.get("path", "")
+                sub = await _render_subtree(
+                    kd, kp, remaining - 1 if remaining > 0 else -1, pad
+                )
+                if sub:
+                    out.append("")
+                    out.append(sub)
+        return "\n".join(out)
 
     memory = await graph.get_memory_by_path(path, domain, namespace=get_namespace())
 
@@ -46,6 +103,11 @@ async def fetch_and_format_memory(uri: str, track_access: bool = False) -> str:
                 context="mcp_read"
             )
         )
+
+    if budget[0] > 0:
+        budget[0] -= 1
+    else:
+        return f"# [{make_uri(domain, path)}]\n(内容省略：已达 max_nodes 上限)"
 
     children = await graph.get_children(
         memory["node_uuid"],
@@ -123,21 +185,36 @@ async def fetch_and_format_memory(uri: str, track_access: bool = False) -> str:
         pass
 
     if children:
-        lines.append("---")
-        lines.append("更深层的记忆:")
-        lines.append("")
+        # depth==0 keeps the original "list direct-child URIs" behaviour;
+        # depth>=1 / -1 expands the subtree inline.
+        if depth and depth != 0:
+            for child in children:
+                child_domain = child.get("domain", disp_domain)
+                child_path = child.get("path", "")
+                block = await _render_subtree(
+                    child_domain, child_path,
+                    depth - 1 if depth > 0 else -1,
+                    "",
+                )
+                if block:
+                    lines.append("")
+                    lines.append(block)
+        else:
+            lines.append("---")
+            lines.append("更深层的记忆:")
+            lines.append("")
 
-        for child in children:
-            child_domain = child.get("domain", disp_domain)
-            child_path = child.get("path", "")
-            child_uri = make_uri(child_domain, child_path)
+            for child in children:
+                child_domain = child.get("domain", disp_domain)
+                child_path = child.get("path", "")
+                child_uri = make_uri(child_domain, child_path)
 
-            child_disclosure = child.get("disclosure")
-            
-            if child_disclosure:
-                lines.append(f"- {child_uri} ({child_disclosure})")
-            else:
-                lines.append(f"- {child_uri}")
+                child_disclosure = child.get("disclosure")
+
+                if child_disclosure:
+                    lines.append(f"- {child_uri} ({child_disclosure})")
+                else:
+                    lines.append(f"- {child_uri}")
 
     return "\n".join(lines)
 

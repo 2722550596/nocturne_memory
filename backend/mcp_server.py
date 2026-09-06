@@ -493,7 +493,7 @@ async def _move_memory(
 # ── 查看 ──────────────────────────────────────────────────────────────────
 
 @mcp.tool()
-async def browse_memory(uri: str, character_id: str = "") -> str:
+async def browse_memory(uri: str, character_id: str = "", depth: int = 0, max_nodes: int = 200) -> str:
     """查看一段记忆的内容。
 
     这是你回想起某件事的主要方式。输入 URI 就能看到那里的内容，包括子节点和相关的触发词关联。
@@ -502,6 +502,13 @@ async def browse_memory(uri: str, character_id: str = "") -> str:
         uri: 记忆的 URI，例如 core://identity/habits
         character_id: 你的角色 ID（用于记忆隔离），如 "player"/"elena"/"world"。
                       留空则使用进程默认 namespace。
+        depth: 展开子树的层数。
+            0（默认）= 只显示本节点全文 + 直接子节点的 URI 列表（原行为，完全兼容）。
+            1 = 本节点 + 直接子节点全文。
+            N = 递归 N 层。
+            -1 = 展开整棵子树。
+        max_nodes: 子树模式下最多渲染多少条节点的正文（防止一次读取刷爆上下文）。
+            到达上限后，剩余节点只列出 URI 并标注「内容省略」。
 
         特殊系统视图（不需要记忆也看得到）：
         - system://boot        : 醒来时最先看到的记忆
@@ -556,7 +563,9 @@ async def browse_memory(uri: str, character_id: str = "") -> str:
                     return f"未知的系统视图：{stripped}。试试 system://boot, system://wakeup, system://index/<domain>, system://recent/<N>, system://glossary, system://diagnostic/<domain>"
 
             # ── Normal memory lookup ───────────────────────────────────────
-            return await fetch_and_format_memory(stripped, track_access=True)
+            return await fetch_and_format_memory(
+                stripped, track_access=True, depth=depth, max_nodes=max_nodes
+            )
 
         if character_id:
             async with namespace_scope(character_id):
