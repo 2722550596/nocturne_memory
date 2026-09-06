@@ -320,7 +320,7 @@ export default function MemoryBrowser() {
       try {
         const res = await searchMemories(query.trim());
         if (seq !== searchSeqRef.current) return;
-        setSearchResults(Array.isArray(res.results) ? res.results : []);
+        setSearchResults(Array.isArray(res) ? res : []);
       } catch {
         if (seq !== searchSeqRef.current) return;
         setSearchResults([]);
