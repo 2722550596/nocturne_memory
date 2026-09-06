@@ -30,6 +30,7 @@ from sqlalchemy import (
 from sqlalchemy.ext.asyncio import AsyncSession
 from .models import (
     ROOT_NODE_UUID,
+    PLACEHOLDER_CONTENT,
     Node,
     Memory,
     Edge,
@@ -437,6 +438,12 @@ class GraphService:
                         "priority": edge.priority,
                         "memory_id": memory.id,
                         "node_uuid": path_obj.node_uuid,
+                        # Already joined; exposing them lets callers that only
+                        # need listing + sort keys skip the per-item detail
+                        # query (N+1).
+                        "disclosure": edge.disclosure,
+                        "content": memory.content,
+                        "created_at": memory.created_at.isoformat() if memory.created_at else "",
                     }
                 )
 
@@ -592,11 +599,14 @@ class GraphService:
 
             parent_node_groups: Dict[tuple, List[str]] = defaultdict(list)
 
+            parent_child_counts: Dict[tuple, int] = defaultdict(int)
+
             orphaned_nodes = []
             for (domain, path_str), (node, memory) in paths_dict.items():
                 if "/" in path_str:
                     parent_path_str = path_str.rsplit("/", 1)[0]
                     parent_node_groups[(domain, parent_path_str, node.uuid)].append(path_str)
+                    parent_child_counts[(domain, parent_path_str)] += 1
                     if (domain, parent_path_str) not in paths_dict:
                         snippet = ""
                         memory_id = None
@@ -616,6 +626,20 @@ class GraphService:
                 else:
                     parent_node_groups[(domain, "", node.uuid)].append(path_str)
 
+            # 4. Placeholder Nodes — stubs auto-created by the remember tools when
+            #    a parent was missing.  They still hold PLACEHOLDER_CONTENT and
+            #    need a real write-back; the child count says how urgent that is.
+            placeholder_nodes = []
+            for (domain, path_str), (node, memory) in paths_dict.items():
+                if not memory or memory.content != PLACEHOLDER_CONTENT:
+                    continue
+                placeholder_nodes.append({
+                    "uuid": node.uuid,
+                    "uri": f"{domain}://{path_str}",
+                    "created_at": node.created_at.isoformat() if node.created_at else None,
+                    "child_count": parent_child_counts.get((domain, path_str), 0),
+                })
+
             duplicate_aliases = []
             for (domain, parent_path_str, node_uuid), paths_list in parent_node_groups.items():
                 if len(paths_list) > 1:
@@ -628,12 +652,16 @@ class GraphService:
                         "paths": paths_list,
                         "count": len(paths_list)
                     })
-
             return {
                 "stale_nodes": sorted(list(stale_nodes.values()), key=lambda x: x.get("last_accessed_at") or x.get("created_at") or ""),
                 "crowded_nodes": sorted(list(crowded_parents.values()), key=lambda x: x["child_count"], reverse=True),
                 "orphaned_nodes": sorted(orphaned_nodes, key=lambda x: x.get("created_at") or ""),
-                "duplicate_aliases": sorted(duplicate_aliases, key=lambda x: x["count"], reverse=True)
+                "duplicate_aliases": sorted(duplicate_aliases, key=lambda x: x["count"], reverse=True),
+                # 子节点多的排前面——挂的东西越多，越该先把父内容补上
+                "placeholder_nodes": sorted(
+                    placeholder_nodes,
+                    key=lambda x: (-x["child_count"], x["uri"]),
+                ),
             }
 
     async def get_random_memory(self, namespace: str = "", domain: Optional[str] = None) -> Optional[Dict[str, Any]]:

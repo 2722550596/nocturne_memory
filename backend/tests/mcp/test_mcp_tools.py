@@ -71,7 +71,8 @@ async def test_diagnostic_view_points_duplicate_aliases_to_forget_memory(mcp_mod
 
     diagnostic = await mcp_module.browse_memory("system://diagnostic/core")
 
-    assert "### 3.2 Duplicate Aliases under Same Parent" in getattr(diagnostic, "message", str(diagnostic))
+    # 章节号会随诊断项增减顺延，这里只锁小节标题本身
+    assert "Duplicate Aliases under Same Parent" in getattr(diagnostic, "message", str(diagnostic))
     assert "core://folder" in getattr(diagnostic, "message", str(diagnostic))
     assert "core://folder_copy" in getattr(diagnostic, "message", str(diagnostic))
     # The remediation hint must reference the current RP tool name

@@ -1,21 +1,40 @@
 import type { ExtensionAPI, SlotRenderContext } from "@earendil-works/pi-coding-agent";
-import { execSync } from "node:child_process";
-import { join } from "node:path";
 
 // ── Config ──────────────────────────────────────────────────────────────────
 
 // The installation script will replace this placeholder with the actual project path.
-const MEMORY_DIR = "{{MEMORY_DIR}}";
-const PYTHON_BIN = join(MEMORY_DIR, "venv", "bin", "python3");
-const QUERY_SCRIPT = join(MEMORY_DIR, "query_slot.py");
+const MEMORY_API = process.env.NOCTURNE_MEMORY_API ?? "{{MEMORY_API}}";
+const API_TOKEN = process.env.NOCTURNE_API_TOKEN ?? "";
 
-// ── Helper: Execute synchronous memory query ────────────────────────────────
+// ── Helper: Async memory slot query via the Nocturne Memory API ─────────────
 
-function queryMemorySync(slotType: string, namespace: string = "default"): string {
+/**
+ * Render a memory slot through the long-lived backend server
+ * (POST /api/pi-tools/slot). The server keeps the Python runtime warm, so a
+ * slot render costs milliseconds instead of a full venv cold start per call
+ * (the previous execSync query_slot.py path measured ~3s per render, which
+ * made every preset compile pay 5s+).
+ */
+async function queryMemorySlot(slotType: string, namespace: string = "default"): Promise<string> {
   try {
-    const cmd = `${PYTHON_BIN} ${QUERY_SCRIPT} ${slotType} ${namespace}`;
-    const output = execSync(cmd, { encoding: "utf-8", timeout: 10000 });
-    return output.trim();
+    const res = await fetch(`${MEMORY_API}/api/pi-tools/slot`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(API_TOKEN ? { Authorization: `Bearer ${API_TOKEN}` } : {}),
+      },
+      body: JSON.stringify({ slot_type: slotType, namespace }),
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!res.ok) {
+      const txt = await res.text();
+      throw new Error(`Nocturne Memory API ${res.status}: ${txt}`);
+    }
+    const json = (await res.json()) as { ok: boolean; content: string };
+    if (!json.ok) {
+      throw new Error(json.content);
+    }
+    return json.content.trim();
   } catch (err) {
     console.error(`Nocturne Memory Slot Error (${slotType} - ${namespace}):`, err);
     return `[Error loading ${slotType} memory for ${namespace}]`;
@@ -25,33 +44,36 @@ function queryMemorySync(slotType: string, namespace: string = "default"): strin
 // ── Slot Registration ───────────────────────────────────────────────────────
 
 export default function nocturneMemoryExtension(pi: ExtensionAPI): void {
-  // Register Boot Slot
+  // Register Boot Slot (async: renders via the warm memory API server)
   pi.registerSlot({
     name: "nocturne-memory-boot",
     description: "Initial memory boot content from Nocturne Memory",
-    render: (ctx: SlotRenderContext): string => {
+    async: true,
+    render: (ctx: SlotRenderContext): Promise<string> => {
       const ns = (ctx.item.options?.namespace as string) || "default";
-      return queryMemorySync("boot", ns);
+      return queryMemorySlot("boot", ns);
     },
   });
 
-  // Register History Slot
+  // Register History Slot (async: renders via the warm memory API server)
   pi.registerSlot({
     name: "nocturne-memory-history",
     description: "Recent conversation history summaries from Nocturne Memory",
-    render: (ctx: SlotRenderContext): string => {
+    async: true,
+    render: (ctx: SlotRenderContext): Promise<string> => {
       const ns = (ctx.item.options?.namespace as string) || "default";
-      return queryMemorySync("history", ns);
+      return queryMemorySlot("history", ns);
     },
   });
 
-  // Register State Slot
+  // Register State Slot (async: renders via the warm memory API server)
   pi.registerSlot({
     name: "nocturne-memory-state",
     description: "Current state/scene records from Nocturne Memory",
-    render: (ctx: SlotRenderContext): string => {
+    async: true,
+    render: (ctx: SlotRenderContext): Promise<string> => {
       const ns = (ctx.item.options?.namespace as string) || "default";
-      return queryMemorySync("state", ns);
+      return queryMemorySlot("state", ns);
     },
   });
 
@@ -68,10 +90,11 @@ export default function nocturneMemoryExtension(pi: ExtensionAPI): void {
 
     const details: unknown = (event as { details?: unknown }).details;
     const structured = (details as { structuredContent?: { result?: { revision_id?: number }; revision_id?: number } } | null | undefined)?.structuredContent;
-    if (!structured) return;
-    // FastMCP wraps the Pydantic model dump in a "result" key
-    const revId = structured.result?.revision_id ?? structured.revision_id;
-    
+    const flatRevId = (details as { revision_id?: number } | null | undefined)?.revision_id;
+    // FastMCP wraps the Pydantic model dump in a "result" key; native pi tools
+    // (nocturne-memory-tools.ts) expose revision_id flat in details.
+    const revId = structured?.result?.revision_id ?? structured?.revision_id ?? flatRevId;
+
     if (revId != null) {
       pi.appendEntry("nocturne_memory_checkpoint", { revision_id: revId });
     }
@@ -83,7 +106,7 @@ export default function nocturneMemoryExtension(pi: ExtensionAPI): void {
 
     const branch = ctx.sessionManager.getBranch(newLeafId);
     let targetRevId: number | null = null;
-    
+
     for (let i = branch.length - 1; i >= 0; i--) {
       const entry = branch[i];
       if (entry.type === "custom" && entry.customType === "nocturne_memory_checkpoint") {
@@ -94,7 +117,7 @@ export default function nocturneMemoryExtension(pi: ExtensionAPI): void {
 
     if (targetRevId != null) {
       try {
-        const res = await fetch(`http://127.0.0.1:8233/review/revisions/${targetRevId}/checkout`, {
+        const res = await fetch(`${MEMORY_API}/review/revisions/${targetRevId}/checkout`, {
           method: "POST",
         });
         if (!res.ok) {

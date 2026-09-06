@@ -17,6 +17,7 @@ read-only and one-directional. .env files containing only Docker Compose vars
 (POSTGRES_USER/PASSWORD/DB) are ignored to prevent generating default configs.
 """
 
+import contextvars
 import json
 import os
 import secrets
@@ -472,20 +473,100 @@ def get_boot_uris(namespace: str = "") -> list[str]:
     return []
 
 
-def get_clock_state() -> tuple[bool, Optional[str]]:
-    """Return (enabled, reference_time) for the active clock.
+# Per-request world-clock override (multi-role single-process mode).
+# A pi extension may set the active clock mode for the duration of one HTTP
+# request (see pi_tools.invoke); when unset, falls back to the process-level
+# config.json / env world_clock. Mirrors db.namespace's contextvar pattern.
+_clock_override: "contextvars.ContextVar[Optional[dict[str, Any]]]" = contextvars.ContextVar(
+    "world_clock_override", default=None
+)
 
-    enabled=True (default): world-clock mode; reference is
-    world_clock.current_time (None when unset).
-    enabled=False: real-clock mode; the world clock is off and the reference
-    falls back to today's real date (YYYY-MM-DD).
+
+def set_world_clock_override(enabled: bool, current_time: Optional[str] = None) -> contextvars.Token:
+    """Scope the active world clock to the current async task/request.
+
+    enabled=True -> world-clock mode; reference is *current_time* (falls back
+    to the process-level config value when omitted).
+    enabled=False -> real-clock mode.
     """
-    clock = _load().get("world_clock", {}) or {}
+    return _clock_override.set({"enabled": enabled, "current_time": current_time})
+
+
+def reset_world_clock_override(token: contextvars.Token) -> None:
+    _clock_override.reset(token)
+
+
+def _active_namespace() -> str:
+    """Current namespace from the db.namespace contextvar (lazy import avoids cycles)."""
+    try:
+        from db.namespace import get_namespace
+        return get_namespace()
+    except Exception:  # noqa: BLE001 - best-effort; fall back to global
+        return ""
+
+
+def get_world_clock(namespace: str = "") -> dict:
+    """Get the world-clock config for a namespace.
+
+    Per-namespace overrides live under config `world_clocks[namespace]` (same
+    per-namespace pattern as boot_uris). When a namespace has no override, the
+    global `world_clock` section is the default, so one backend serves both
+    per-world clocks and a shared fallback.
+    """
+    cfg = _load()
+    clocks = cfg.get("world_clocks", {}) or {}
+    if namespace and clocks.get(namespace):
+        return clocks[namespace]
+    return cfg.get("world_clock", {}) or {}
+
+
+def set_world_clock(clock: dict, namespace: str = "") -> None:
+    """Persist the world-clock config for a namespace under world_clocks[namespace]."""
+    cfg = _load()
+    if "world_clocks" not in cfg:
+        cfg["world_clocks"] = {}
+    cfg["world_clocks"][namespace] = clock
+    _save_file(cfg)
+    _invalidate()
+
+
+def _config_clock_state() -> tuple[bool, Optional[str]]:
+    """Resolve (enabled, reference_time) from config: per-namespace, else global."""
+    clock = get_world_clock(_active_namespace())
     enabled = clock.get("enabled", True) is not False
     if enabled:
         return True, clock.get("current_time")
     from datetime import datetime
     return False, datetime.now().strftime("%Y-%m-%d")
+
+
+def get_clock_state() -> tuple[bool, Optional[str]]:
+    """Return (enabled, reference_time) for the active clock.
+
+    enabled=True (default): world-clock mode; reference is the per-namespace /
+    global world_clock.current_time (None when unset).
+    enabled=False: real-clock mode; the world clock is off and the reference
+    falls back to today's real date (YYYY-MM-DD).
+
+    Resolution order:
+      1. per-request override (set_world_clock_override) — enables one process
+         to serve multiple roles (e.g. elias world-clock vs luzhou real-clock);
+         an override with enabled=True but no current_time falls back to config.
+      2. per-namespace world_clocks[ns] from config.
+      3. global world_clock from config.
+    """
+    ov = _clock_override.get()
+    if ov is not None:
+        enabled = bool(ov.get("enabled", True))
+        if not enabled:
+            from datetime import datetime
+            return False, datetime.now().strftime("%Y-%m-%d")
+        ov_time = ov.get("current_time")
+        if ov_time:
+            return True, ov_time
+        # enabled=True but no explicit reference -> resolve from config
+        return _config_clock_state()
+    return _config_clock_state()
 
 
 def get_all_boot_uris() -> dict[str, list[str]]:

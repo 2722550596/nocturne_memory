@@ -12,7 +12,7 @@ from .database import DatabaseManager
 from .snapshot import ChangesetStore, get_changeset_store, commit_checkpoint
 from .namespace import get_namespace, set_namespace
 from .models import (
-    Base, ROOT_NODE_UUID, Node, Memory, Edge, Path,
+    Base, ROOT_NODE_UUID, PLACEHOLDER_CONTENT, Node, Memory, Edge, Path,
     GlossaryKeyword, SearchDocument, SearchDocumentEmbedding, ChangeCollector, Preset, Revision,
 )
 

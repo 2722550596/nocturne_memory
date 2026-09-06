@@ -39,6 +39,7 @@ from models.mcp_results import (
     ToolResult, CreateResult, UpdateResult, ForgetResult,
     LinkResult, TagResult, ArchiveResult
 )
+from db.models import PLACEHOLDER_CONTENT
 from text_patch import (
     normalize_with_positions,
     find_valid_matches,
@@ -361,6 +362,134 @@ def _resolve_parent_children(graph, uri: str, namespace: str) -> Tuple[str, str]
     return domain, path
 
 
+# ── 批量工具共享辅助 ───────────────────────────────────────────────────────
+
+# 占位内容常量定义在 db.models，供 graph / system_views / mcp_server 共用。
+
+def _format_placeholder_notice(domain: str, placeholders: List[str]) -> str:
+    """把新建的占位父节点格式化成一条回写提醒。
+
+    任何会顺带建出占位祖先的工具都该把这段话拼进返回消息里：
+    内容先落地了，但占位父节点还是空的，模型需要回头补真内容。
+    """
+    if not placeholders:
+        return ""
+    stub_uris = "、".join(f"{domain}://{p}" for p in placeholders)
+    return (
+        f"\n\n注意：写入时父节点还不存在，已先建了占位节点 {stub_uris}"
+        f"（内容为「{PLACEHOLDER_CONTENT}」）。"
+        f"\n等一下请回写这些父节点的真实内容：edit_memory(uri=..., new_text=\"...\")。"
+    )
+
+
+async def _ensure_parent_chain(
+    graph, domain: str, parent_path: str, namespace: str
+) -> List[str]:
+    """逐级补齐缺失的祖先路径，缺的一律建成占位容器节点。
+
+    记 `core://a/b/c` 而 `a`、`a/b` 都还不存在时，先把这条链补出来，
+    让子节点能立刻落地。占位节点内容是 PLACEHOLDER_CONTENT，调用方
+    需要在返回给模型的结果里提醒稍后回写真实内容。
+
+    返回新建的占位路径列表（由浅到深）；祖先已齐全时返回空列表。
+    """
+    if not parent_path:
+        return []
+
+    created: List[str] = []
+    current = ""
+    for segment in parent_path.split("/"):
+        current = f"{current}/{segment}" if current else segment
+        if await graph.get_memory_by_path(current, domain, namespace=namespace):
+            continue
+        await graph.create_memory(
+            parent_path=current.rsplit("/", 1)[0] if "/" in current else "",
+            content=PLACEHOLDER_CONTENT,
+            priority=8,
+            title=segment,
+            disclosure="",
+            domain=domain,
+            namespace=namespace,
+        )
+        created.append(current)
+    return created
+
+
+async def _ensure_target_parent(graph, domain: str, path: str, namespace: str) -> Optional[str]:
+    """确保目标路径的父路径存在；不存在则自动创建容器节点。
+
+    移动/归档到新位置时，目标父目录（如 archive://scenes/xxx 的 scenes）
+    很可能还不存在。这里自动补一个轻量容器节点，返回创建的容器 path；
+    父已存在时返回 None。注意：只确保「父」存在，不创建目标节点本身。
+    """
+    if "/" not in path:
+        return None
+    created = await _ensure_parent_chain(
+        graph, domain, path.rsplit("/", 1)[0], namespace
+    )
+    return created[-1] if created else None
+
+
+async def _move_memory(
+    graph,
+    source_uri: str,
+    target_uri: str,
+    namespace: str,
+    dry_run: bool = False,
+) -> Tuple[str, str, str]:
+    """把一条记忆连同整棵子树移到新位置。
+
+    可跨域、可改名（目标可以是完整新 URI）。顺序保证：先挂新路径
+    （级联建子树路径），再删旧路径（子节点已有新路径，不会触发孤儿保护）。
+
+    Returns:
+        (new_uri, node_uuid, info) — info 是给角色看的附加说明
+        （如自动创建的容器目录）。
+    """
+    src_domain, src_path = parse_uri(source_uri)
+    tgt_domain, tgt_path = parse_uri(target_uri)
+    valid = _get_valid_domain_list()
+    if tgt_domain not in valid:
+        raise ValueError(f"没有 '{tgt_domain}' 这个域名。可用：{', '.join(valid)}")
+    if not src_path:
+        raise ValueError(f"不能移动域名根 '{src_domain}://'。")
+    if not tgt_path:
+        raise ValueError("目标必须是完整路径（如 'archive://scenes/xxx'），不能是域名根。")
+    if src_domain == tgt_domain and src_path == tgt_path:
+        raise ValueError("源和目标完全相同，没有可移动的。")
+
+    src = await graph.get_memory_by_path(src_path, src_domain, namespace=namespace)
+    if not src:
+        raise ValueError(f"没找到源「{source_uri}」。")
+    if await graph.get_memory_by_path(tgt_path, tgt_domain, namespace=namespace):
+        raise ValueError(f"目标「{target_uri}」已经存在。先 forget 掉或换个目标位置。")
+
+    info = ""
+    if not dry_run:
+        created_parent = await _ensure_target_parent(graph, tgt_domain, tgt_path, namespace)
+        if created_parent:
+            info = f"（自动创建了目录 {tgt_domain}://{created_parent}）"
+
+        await graph.add_path(
+            new_path=tgt_path,
+            target_path=src_path,
+            new_domain=tgt_domain,
+            target_domain=src_domain,
+            priority=src.get("priority", 5),
+            disclosure=src.get("disclosure"),
+            namespace=namespace,
+        )
+        await graph.remove_path(src_path, src_domain, namespace=namespace)
+    else:
+        # 预览模式：只提示父目录是否需要自动创建
+        if "/" in tgt_path:
+            parent_path = tgt_path.rsplit("/", 1)[0]
+            if not await graph.get_memory_by_path(parent_path, tgt_domain, namespace=namespace):
+                info = f"（目标目录 {tgt_domain}://{parent_path} 不存在，执行时会自动创建）"
+
+    return f"{tgt_domain}://{tgt_path}", src["node_uuid"], info
+
+
 # ── 查看 ──────────────────────────────────────────────────────────────────
 
 @mcp.tool()
@@ -511,6 +640,10 @@ async def remember_memory(uri: str, content: str, time: Optional[str] = None, ch
               - Events：需要时间线追踪的具体事件必须写明时间。例如某次相遇、交流（如 core://events/first_impression）。
               - Static：背景故事、性格习惯、世界观规则、常识（如 core://identity, core://world, core://relationships）。这类信息是永久有效的，无需传入时间。
         character_id: 你的角色 ID（用于记忆隔离），如 "player"/"elena"/"world"。留空用默认 namespace。
+
+    Note:
+        父节点不存在时不会报错：会先用「（记得补充）」占位补齐缺失的祖先，
+        子节点照常写入，返回结果里会提醒你稍后回写父节点的真实内容。
     """
     try:
         async def _do():
@@ -537,13 +670,21 @@ async def remember_memory(uri: str, content: str, time: Optional[str] = None, ch
                 final_world_time = current_world_time
 
             graph = get_graph_service()
-            await graph.create_memory(
+            # 父节点不存在时不再报错：先补占位父链，让子节点立刻落地，
+            # 结果里提醒模型稍后回写这些占位节点的真实内容。
+            placeholders = await _ensure_parent_chain(
+                graph, domain, parent_path, get_namespace()
+            )
+
+            result = await graph.create_memory(
                 parent_path, content, priority=5, title=title, domain=domain,
                 namespace=get_namespace(),
                 world_timestamp=final_world_time
             )
 
-            return f"已记下记忆: {uri}" + (f" (发生于 {final_world_time})" if final_world_time else "")
+            msg = f"已记下记忆: {uri}" + (f" (发生于 {final_world_time})" if final_world_time else "")
+            msg += _format_placeholder_notice(domain, placeholders)
+            return msg
 
         if character_id:
             async with namespace_scope(character_id):
@@ -554,26 +695,34 @@ async def remember_memory(uri: str, content: str, time: Optional[str] = None, ch
 
 
 @mcp.tool()
-async def set_world_time(time: str) -> str:
-    """设置当前世界时间。
+async def set_world_time(time: str, character_id: str = "") -> str:
+    """设置当前世界时间（按 namespace 隔离）。
 
-    改变此设置后，后续创建的记忆会自动关联到新时间，且在查看记忆时会更新“N天前”的计算参考。
+    改变指定 namespace 的世界时间后，该 namespace 后续创建的记忆会自动关联到新时间，
+    且在查看记忆时会更新“N天前”的计算参考。GM 可通过 character_id 指定要调整的世界
+    （例如 character_id="elias" 调整 magnolia 世界时钟，不影响其他 namespace）。
 
     Args:
         time: 世界观日期（如 2024-06-05）或相对偏移量（如 "+1d"）。
+        character_id: 目标角色 ID / namespace（用于世界时钟隔离）。留空用当前/默认 namespace。
     """
     try:
-        config_data = get_config()
-        clock = config_data.get("world_clock", {})
-        current_time = clock.get("current_time", "2024-06-01")
-        
-        from system_views import parse_relative_offset
-        new_time = parse_relative_offset(time, current_time) or time
-        
-        clock["current_time"] = new_time
-        _cfg.set_value("world_clock", clock)
-        
-        return f"当前世界时间已设置为: {new_time}"
+        async def _do():
+            ns = get_namespace()
+            clock = dict(_cfg.get_world_clock(ns))
+            current_time = clock.get("current_time", "2024-06-01")
+
+            from system_views import parse_relative_offset
+            new_time = parse_relative_offset(time, current_time) or time
+
+            clock["current_time"] = new_time
+            _cfg.set_world_clock(clock, ns)
+
+            return f"当前世界时间已设置为: {new_time}"
+        if character_id:
+            async with namespace_scope(character_id):
+                return await _do()
+        return await _do()
     except Exception as e:
         return f"设置失败: {str(e)}"
 
@@ -616,6 +765,10 @@ async def remember_child_memory(
 
     Returns:
         新建记忆的 URI
+
+    Note:
+        父节点不存在时不会报错：会先用「（记得补充）」占位补齐缺失的祖先，
+        子节点照常写入，返回结果里会提醒你稍后回写父节点的真实内容。
     """
     graph = get_graph_service()
 
@@ -635,6 +788,12 @@ async def remember_child_memory(
             config = get_config()
             clock = config.get("world_clock", {})
             _, current_world_time = _cfg.get_clock_state()
+
+            # 父节点不存在时不再报错：先补占位父链，让子节点立刻落地，
+            # 结果里提醒模型稍后回写这些占位节点的真实内容。
+            placeholders = await _ensure_parent_chain(
+                graph, domain, parent_path, get_namespace()
+            )
 
             if time:
                 from system_views import parse_relative_offset
@@ -670,6 +829,8 @@ async def remember_child_memory(
             msg = f"记住了：「{created_uri}」"
             if final_world_time:
                 msg += f" (发生于 {final_world_time})"
+
+            msg += _format_placeholder_notice(domain, placeholders)
 
             if result.get("path"):
                 msg += f"\n\n新记的事已经放好了。你看看和它相关的其他记忆有没有什么要整理的？"
@@ -1159,6 +1320,11 @@ async def merge_memories(
 
     Examples:
         merge_memories(["core://events/0301_first_impression_Tina", "core://events/0302_small_talk_Tina"], "core://events/Tina", "缇娜这段时候给我留下了不错的印象……", reason="这几天的事都和缇娜有关")
+
+    Note:
+        目标父节点不存在时不会报错：会先用「（记得补充）」占位补齐，
+        合并结果照常写入，返回消息里会提醒你回写父节点。
+        源记忆缺失或删除失败都会在返回消息里列出来，不会静默跳过。
     """
     graph = get_graph_service()
     glossary = get_glossary_service()
@@ -1172,21 +1338,37 @@ async def merge_memories(
             namespace = get_namespace()
 
             # 1. 读取所有源记忆
+            #    缺失的一次性全列出来，而不是撞到第一条就退出——模型需要
+            #    一眼看清要补哪几条，而不是来回试。
             sources = []
             source_glossary_keywords = []
+            missing = []
             for uri in uris:
                 domain, path = parse_uri(uri)
                 memory = await graph.get_memory_by_path(path, domain, namespace=namespace)
                 if not memory:
-                    return ToolResult(message=f"没找到源记忆「{uri}」。")
+                    missing.append(uri)
+                    continue
                 sources.append((domain, path, memory))
                 # 收集标签
                 node_glossary = await glossary.get_glossary_for_node(memory["node_uuid"], namespace=namespace)
                 source_glossary_keywords.extend(node_glossary)
 
+            if missing:
+                return ToolResult(
+                    message=f"没找到源记忆：{'、'.join(missing)}。请确认 URI 后再合并。"
+                )
+            if len(sources) < 2:
+                return ToolResult(message="至少需要两条记忆才能合并。")
+
             # 2. 创建目标记忆
             parent_path = "/".join(target_path.split("/")[:-1])
             title_part = target_path.split("/")[-1]
+
+            # 父节点不存在时先补占位父链，让合并结果立刻落地。
+            placeholders = await _ensure_parent_chain(
+                graph, target_domain, parent_path, namespace
+            )
 
             result = await graph.create_memory(
                 parent_path=parent_path,
@@ -1213,29 +1395,33 @@ async def merge_memories(
                             pass
 
             # 4. 删除源记忆（逐条删除）
+            #    失败要报出来：源留在原处会让模型以为合并很干净，
+            #    实际上旧入口还在，之后会重复想起同一件事。
             deleted_sources = []
+            failed_sources = []
             for domain, path, memory in sources:
                 full_uri = make_uri(domain, path)
                 try:
                     await graph.remove_path(path, domain, namespace=namespace)
                     deleted_sources.append(full_uri)
                 except Exception as e:
-                    # 单条删除失败不阻断整体流程
-                    pass
+                    failed_sources.append(f"{full_uri}（{e}）")
 
             _record_rows(
                 before_state=result.get("rows_before", {}),
                 after_state=result.get("rows_after", {}),
             )
 
-            msg = f"合并完成：{len(uris)} 条记忆 → 「{created_uri}」"
+            msg = f"合并完成：{len(sources)} 条记忆 → 「{created_uri}」"
             if reason:
                 msg += f"\n原因：{reason}"
-            if deleted_sources:
-                msg += f"\n已删除旧入口：{len(deleted_sources)} 条"
+            msg += f"\n已删除旧入口：{len(deleted_sources)}/{len(sources)} 条"
+            if failed_sources:
+                msg += f"\n没删掉的旧入口（还留在原处，需要手动确认）：{'、'.join(failed_sources)}"
             if source_glossary_keywords:
                 transferred = len(set(source_glossary_keywords))
                 msg += f"\n转移了 {transferred} 个标签到新记忆"
+            msg += _format_placeholder_notice(target_domain, placeholders)
 
             db = get_db_manager()
             async with db.session() as session:
@@ -1290,6 +1476,11 @@ async def organize_memory(
 
     Examples:
         organize_memory("core://话题/关于他", ["core://碎片/对话1", "core://碎片/他说过的话"], "我对他的整体印象……", mode="move", tags=["他", "朋友"])
+
+    Note:
+        主题父节点不存在时不会报错：会先用「（记得补充）」占位补齐，
+        主题照常建立，返回消息里会提醒你回写父节点。
+        源记忆关联不上、旧入口删不掉都会在返回消息里列出来，不会静默跳过。
     """
     graph = get_graph_service()
     glossary = get_glossary_service()
@@ -1310,6 +1501,11 @@ async def organize_memory(
             title_part = target_path.split("/")[-1]
 
             # 1. 创建主题总结节点
+            #    父节点不存在时先补占位父链：主题先落地，源记忆才有地方挂。
+            placeholders = await _ensure_parent_chain(
+                graph, target_domain, parent_path, namespace
+            )
+
             result = await graph.create_memory(
                 parent_path=parent_path,
                 content=content,
@@ -1334,8 +1530,12 @@ async def organize_memory(
                             pass
 
             # 3. 处理源记忆
+            #    每一条的成败都要记下来。以前这里整段 try/except: pass，
+            #    挂不上就静默跳过，模型拿到「整理好了」却一条源都没归拢。
             linked = 0
             moved = 0
+            link_failures = []
+            move_failures = []
             for src_uri in source_uris:
                 src_domain, src_path = parse_uri(src_uri)
                 src_basename = src_path.split("/")[-1]
@@ -1353,26 +1553,44 @@ async def organize_memory(
                         namespace=namespace,
                     )
                     linked += 1
+                except Exception as e:
+                    link_failures.append(f"{src_uri} → {target_domain}://{child_path}（{e}）")
+                    continue
 
-                    if mode == "move":
+                if mode == "move":
+                    try:
                         await graph.remove_path(src_path, src_domain, namespace=namespace)
                         moved += 1
-
-                except Exception:
-                    pass
+                    except Exception as e:
+                        move_failures.append(f"{src_uri}（{e}）")
 
             _record_rows(
                 before_state={},
                 after_state=result.get("rows_after", {}),
             )
 
+            total = len(source_uris)
             msg_parts = [f"整理好了：「{topic_uri}」"]
-            if linked:
-                msg_parts.append(f"  关联了 {linked} 条记忆到主题下")
-            if moved:
-                msg_parts.append(f"  移除了 {moved} 个旧入口")
+            if mode == "keep":
+                msg_parts.append("  模式 keep：只建了主题，没动源记忆")
+            else:
+                msg_parts.append(f"  关联了 {linked}/{total} 条记忆到主题下")
+                if link_failures:
+                    msg_parts.append(
+                        f"  没关联上的：{'、'.join(link_failures)}"
+                    )
+                if mode == "move":
+                    msg_parts.append(f"  移除了 {moved}/{linked} 个旧入口")
+                    if move_failures:
+                        msg_parts.append(
+                            f"  没删掉的旧入口（还留在原处）：{'、'.join(move_failures)}"
+                        )
             if tags:
                 msg_parts.append(f"  标签：{', '.join(tags)}")
+
+            notice = _format_placeholder_notice(target_domain, placeholders)
+            if notice:
+                msg_parts.append(notice.lstrip("\n"))
 
             db = get_db_manager()
             async with db.session() as session:
@@ -1396,28 +1614,516 @@ async def organize_memory(
         return ToolResult(message=f"没整理好：{str(e)}")
 
 
-# ── 存档 ──────────────────────────────────────────────────────────────────
+# ── 移动 / 重命名 ──────────────────────────────────────────────────────────
 
 @write_tool()
-async def archive_memory(
-    title: str,
-    history: str,
+async def rename_memory(
+    uri: str,
+    new_title: str,
+    character_id: str = "",
+) -> ToolResult | UpdateResult:
+    """给一段记忆改名字（路径最后一段）。内容和子节点都会跟着搬，标签不动。
+
+    改名是「移动」的特例：只改名字、不换位置。如果还想同时换到别的
+    域或目录下，用 move_memory。
+
+    Args:
+        uri: 要改名的记忆 URI，如 "core://events/luckin_0922"
+        new_title: 新名字（路径最后一段）。只能用字母、数字、连字符和下划线。
+        character_id: 你的角色 ID（用于记忆隔离），如 "player"/"elena"/"world"。留空用默认 namespace。
+
+    Examples:
+        rename_memory("core://events/luckin_0922", "luckin_first_sight_0922")
+    """
+    if not new_title or not re.match(r"^[a-zA-Z0-9_-]+$", new_title):
+        return ToolResult(message="新名字只能包含字母、数字、连字符和下划线（不能有空格、斜杠）。")
+
+    graph = get_graph_service()
+
+    try:
+        async def _do():
+            domain, path = parse_uri(uri)
+            if not path:
+                return ToolResult(message="不能重命名域名根。")
+
+            parent_path = path.rsplit("/", 1)[0] if "/" in path else ""
+            target_uri = make_uri(domain, f"{parent_path}/{new_title}" if parent_path else new_title)
+
+            new_uri, node_uuid, info = await _move_memory(
+                graph, uri, target_uri, get_namespace()
+            )
+            db = get_db_manager()
+            async with db.session() as session:
+                rev_id = await commit_checkpoint(session)
+
+            msg = f"改名完成：「{uri}」→「{new_uri}」"
+            if info:
+                msg += f"\n{info}"
+            return UpdateResult(
+                message=msg,
+                revision_id=rev_id,
+                node_uuid=node_uuid,
+                uri=new_uri,
+            )
+
+        if character_id:
+            async with namespace_scope(character_id):
+                return await _do()
+        return await _do()
+
+    except ValueError as e:
+        return ToolResult(message=f"没改名：{str(e)}")
+    except Exception as e:
+        return ToolResult(message=f"没改名：{str(e)}")
+
+
+@write_tool()
+async def move_memory(
+    uri: str,
+    target_uri: str,
+    character_id: str = "",
+) -> ToolResult | UpdateResult:
+    """把一段记忆（连同子节点）搬到新位置。可以跨域、可以改名。
+
+    适合整理时把节点从一处迁到另一处——比如把退役场景从 history 域
+    归档到 archive 域，或者把零散碎片归到主题下。目标目录不存在时
+    会自动创建。
+
+    Args:
+        uri: 要移动的记忆 URI，如 "history://scenes/warm_water_aftermath_0908_1836"
+        target_uri: 目标位置的完整 URI，如 "archive://scenes/warm_water_0908"
+        character_id: 你的角色 ID（用于记忆隔离），如 "player"/"elena"/"world"。留空用默认 namespace。
+
+    Examples:
+        move_memory("history://scenes/warm_water_aftermath_0908_1836", "archive://scenes/warm_water_0908")
+    """
+    graph = get_graph_service()
+
+    try:
+        async def _do():
+            new_uri, node_uuid, info = await _move_memory(
+                graph, uri, target_uri, get_namespace()
+            )
+            db = get_db_manager()
+            async with db.session() as session:
+                rev_id = await commit_checkpoint(session)
+
+            msg = f"移动完成：「{uri}」→「{new_uri}」"
+            if info:
+                msg += f"\n{info}"
+            return UpdateResult(
+                message=msg,
+                revision_id=rev_id,
+                node_uuid=node_uuid,
+                uri=new_uri,
+            )
+
+        if character_id:
+            async with namespace_scope(character_id):
+                return await _do()
+        return await _do()
+
+    except ValueError as e:
+        return ToolResult(message=f"没移动：{str(e)}")
+    except Exception as e:
+        return ToolResult(message=f"没移动：{str(e)}")
+
+
+# ── 批量操作 ───────────────────────────────────────────────────────────────
+
+def _format_batch_report(
+    action: str,
+    items: List[Tuple[str, str, str]],
+    dry_run: bool,
+) -> str:
+    """把批量结果列表格式化成给角色看的报告。
+
+    items: [(status, label, detail)]，status 为 "ok" / "fail" / "skip"。
+    """
+    ok = [it for it in items if it[0] == "ok"]
+    failed = [it for it in items if it[0] == "fail"]
+    skipped = [it for it in items if it[0] == "skip"]
+
+    head = f"{action}预览（未落库）：" if dry_run else f"{action}完成："
+    lines = [head, ""]
+    for status, label, detail in items:
+        mark = {"ok": "[OK]", "fail": "[失败]", "skip": "[跳过]"}.get(status, "[跳过]")
+        lines.append(f"- {mark} {label}")
+        if detail:
+            lines.append(f"    {detail}")
+    lines.append("")
+    lines.append(
+        f"成功 {len(ok)} 条，跳过 {len(skipped)} 条，失败 {len(failed)} 条。"
+    )
+    return "\n".join(lines)
+
+
+@write_tool()
+async def batch_move_memories(
+    moves: List[Dict[str, str]],
+    dry_run: bool = False,
+    character_id: str = "",
+) -> ToolResult:
+    """批量移动记忆。把一组记忆各自搬到新位置（可跨域、可改名）。
+
+    适合整批整理：把一批 history_raw 归档到 archive 域、把一批场景
+    收敛到 scene 域等。每条独立执行，单条失败不阻断其他条。
+    目标目录不存在时会自动创建。
+
+    Args:
+        moves: 移动清单，每个元素 {"source_uri": "从哪里", "target_uri": "到哪里"}。
+        dry_run: True 时只预览（检查源/目标/冲突），不真正执行。
+        character_id: 你的角色 ID（用于记忆隔离）。留空用默认 namespace。
+
+    Examples:
+        batch_move_memories([
+            {"source_uri": "history_raw://scenes/a_raw", "target_uri": "archive://scenes/a_raw"},
+            {"source_uri": "history://scenes/b", "target_uri": "archive://scenes/b"},
+        ])
+    """
+    if not moves:
+        return ToolResult(message="moves 不能为空。")
+
+    graph = get_graph_service()
+
+    try:
+        async def _do():
+            namespace = get_namespace()
+            results: List[Tuple[str, str, str]] = []
+            for m in moves:
+                src = m.get("source_uri", "") if isinstance(m, dict) else ""
+                tgt = m.get("target_uri", "") if isinstance(m, dict) else ""
+                label = f"{src} → {tgt}"
+                try:
+                    new_uri, _, info = await _move_memory(graph, src, tgt, namespace, dry_run=dry_run)
+                    detail = f"将变为 {new_uri}" if dry_run else f"已是 {new_uri}"
+                    if info:
+                        detail += f" {info}"
+                    results.append(("ok", label, detail))
+                except ValueError as e:
+                    results.append(("fail", label, str(e)))
+                except Exception as e:
+                    results.append(("fail", label, str(e)))
+
+            rev_id = None
+            if not dry_run and any(r[0] == "ok" for r in results):
+                db = get_db_manager()
+                async with db.session() as session:
+                    rev_id = await commit_checkpoint(session)
+
+            return ToolResult(
+                message=_format_batch_report("批量移动", results, dry_run),
+                revision_id=rev_id,
+            )
+
+        if character_id:
+            async with namespace_scope(character_id):
+                return await _do()
+        return await _do()
+
+    except Exception as e:
+        return ToolResult(message=f"批量移动没跑完：{str(e)}")
+
+
+@write_tool()
+async def batch_forget_memories(
+    uris: List[str],
+    dry_run: bool = False,
+    character_id: str = "",
+) -> ToolResult:
+    """批量忘掉记忆。一组 URI 一次清理，带预览和失败隔离。
+
+    适合清创：一批退役节点、重复节点一次删掉。删除前有防呆——
+    带子节点的会连坐，被同批更靠前的删除覆盖的会自动跳过；
+    单条失败不阻断其他条。
+
+    Args:
+        uris: 要删除的 URI 列表。
+        dry_run: True 时只预览（每条是否存在、会连坐哪些子节点），不真正执行。
+        character_id: 你的角色 ID（用于记忆隔离）。留空用默认 namespace。
+
+    Examples:
+        batch_forget_memories([
+            "core://events/luckin_0922",
+            "core://events/luckin_friday_plan_0922",
+        ], dry_run=True)
+    """
+    if not uris:
+        return ToolResult(message="uris 不能为空。")
+
+    graph = get_graph_service()
+
+    try:
+        async def _do():
+            namespace = get_namespace()
+            results: List[Tuple[str, str, str]] = []
+            covered: List[str] = []  # 已被同批更靠前删除覆盖的 (domain, path)
+
+            # 深度降序：叶子先删、父节点后删，避免孤儿保护误报
+            # （remove_path 会拒绝删除仍有可达子节点的路径）。
+            ordered_uris = sorted(
+                uris,
+                key=lambda u: -parse_uri(u)[1].count("/"),
+            )
+
+            for uri in ordered_uris:
+                domain, path = parse_uri(uri)
+                try:
+                    if not path:
+                        raise ValueError("不能删除域名根。")
+                    # 已被前面某条的子树删除覆盖？
+                    if any(
+                        d == domain and (p == path or path.startswith(p + "/"))
+                        for d, p in covered
+                    ):
+                        results.append(("skip", uri, "已被同批中更靠前的删除覆盖"))
+                        continue
+
+                    mem = await graph.get_memory_by_path(path, domain, namespace=namespace)
+                    if not mem:
+                        results.append(("fail", uri, "没找到这条记忆"))
+                        continue
+
+                    if dry_run:
+                        children = await graph.get_children(
+                            mem["node_uuid"],
+                            context_domain=domain,
+                            context_path=path,
+                            namespace=namespace,
+                        )
+                        detail = "将删除（含子节点）" if children else "将删除"
+                        if children:
+                            detail += f"：连带 {len(children)} 个子节点"
+                        results.append(("ok", uri, detail))
+                    else:
+                        result = await graph.remove_path(path, domain, namespace=namespace)
+                        rows_before = result.get("rows_before", {})
+                        _record_rows(before_state=rows_before, after_state={})
+                        deleted_paths = len(rows_before.get("paths", []))
+                        extra = max(0, deleted_paths - 1)
+                        detail = f"已删除" + (f"（连带 {extra} 个子节点）" if extra else "")
+                        results.append(("ok", uri, detail))
+
+                    covered.append((domain, path))
+                except ValueError as e:
+                    results.append(("fail", uri, str(e)))
+                except Exception as e:
+                    results.append(("fail", uri, str(e)))
+
+            rev_id = None
+            if not dry_run and any(r[0] == "ok" for r in results):
+                db = get_db_manager()
+                async with db.session() as session:
+                    rev_id = await commit_checkpoint(session)
+
+            return ToolResult(
+                message=_format_batch_report("批量删除", results, dry_run),
+                revision_id=rev_id,
+            )
+
+        if character_id:
+            async with namespace_scope(character_id):
+                return await _do()
+        return await _do()
+
+    except Exception as e:
+        return ToolResult(message=f"批量删除没跑完：{str(e)}")
+
+
+@write_tool()
+async def batch_edit_memories(
+    uris: List[str],
+    importance: Optional[int] = None,
+    when: Optional[str] = None,
+    append: Optional[str] = None,
+    time: Optional[str] = None,
+    dry_run: bool = False,
+    character_id: str = "",
+) -> ToolResult:
+    """批量修改一组记忆的元数据或追加内容。
+
+    适合全库重分级（importance 0-10）、批量改想起条件（when）、
+    批量补时间（time）等维护操作。注意 append 是往每条内容末尾
+    追加同一段文字——只有确实想统一补注时才用。
+
+    Args:
+        uris: 要修改的 URI 列表。
+        importance: 新的重要性（0=最重要，数字越大越次要）。
+        when: 新的想起条件（什么时候该想起这条）。
+        append: 追加到每条内容末尾的文字。
+        time: 新的世界时间（YYYY-MM-DD 或相对位移如 "-1d"）。
+        dry_run: True 时只预览每条当前值 → 将改为什么，不真正执行。
+        character_id: 你的角色 ID（用于记忆隔离）。留空用默认 namespace。
+
+    Examples:
+        batch_edit_memories(["history://scenes/a", "history://scenes/b"], importance=6)
+        batch_edit_memories(["diary://0927_night_talk"], append="\\n（后记：……）")
+    """
+    if not uris:
+        return ToolResult(message="uris 不能为空。")
+    if importance is None and when is None and append is None and time is None:
+        return ToolResult(message="至少要提供一种修改：importance、when、append 或 time。")
+
+    graph = get_graph_service()
+
+    try:
+        async def _do():
+            namespace = get_namespace()
+
+            # 时间解析（与 edit_memory 一致）
+            final_world_time = None
+            if time:
+                config = get_config()
+                _, current_world_time = _cfg.get_clock_state()
+                from system_views import parse_relative_offset
+                offset_date = parse_relative_offset(time, current_world_time)
+                final_world_time = offset_date or time
+
+            results: List[Tuple[str, str, str]] = []
+            for uri in uris:
+                domain, path = parse_uri(uri)
+                try:
+                    if not path:
+                        raise ValueError("不能编辑域名根。")
+                    mem = await graph.get_memory_by_path(path, domain, namespace=namespace)
+                    if not mem:
+                        results.append(("fail", uri, "没找到这条记忆"))
+                        continue
+
+                    new_content = None
+                    if append is not None:
+                        new_content = (mem.get("content") or "") + append
+
+                    if dry_run:
+                        changes = []
+                        if importance is not None:
+                            changes.append(f"重要性 {mem.get('priority')} → {importance}")
+                        if when is not None:
+                            changes.append(f"想起条件 → {when}")
+                        if final_world_time is not None:
+                            changes.append(f"世界时间 → {final_world_time}")
+                        if append is not None:
+                            changes.append(f"内容末尾追加 {len(append)} 字")
+                        results.append(("ok", uri, "；".join(changes) or "无变化"))
+                        continue
+
+                    result = await graph.update_memory(
+                        path=path,
+                        content=new_content,
+                        priority=importance,
+                        disclosure=when,
+                        domain=domain,
+                        namespace=namespace,
+                        world_timestamp=final_world_time,
+                    )
+                    _record_rows(
+                        before_state=result.get("rows_before", {}),
+                        after_state=result.get("rows_after", {}),
+                    )
+                    results.append(("ok", uri, "已修改"))
+                except ValueError as e:
+                    results.append(("fail", uri, str(e)))
+                except Exception as e:
+                    results.append(("fail", uri, str(e)))
+
+            rev_id = None
+            if not dry_run and any(r[0] == "ok" for r in results):
+                db = get_db_manager()
+                async with db.session() as session:
+                    rev_id = await commit_checkpoint(session)
+
+            return ToolResult(
+                message=_format_batch_report("批量编辑", results, dry_run),
+                revision_id=rev_id,
+            )
+
+        if character_id:
+            async with namespace_scope(character_id):
+                return await _do()
+        return await _do()
+
+    except Exception as e:
+        return ToolResult(message=f"批量编辑没跑完：{str(e)}")
+
+
+# ── 存档 ──────────────────────────────────────────────────────────────────
+
+
+def _resolve_content_or_path(value: Optional[str]) -> str:
+    """把「内容或文件路径」解析成内容。
+
+    以 "\\\\"（Windows UNC）或 "/"（WSL 绝对路径）开头的值按文件读取，
+    其余按字面内容返回。UNC 形如 \\\\wsl.localhost\\Ubuntu\\home\\…，
+    会自动转换成 WSL 本地路径 /home/…。
+    """
+    if value is None:
+        return ""
+    stripped = value.strip()
+    if not stripped:
+        return ""
+
+    path = None
+    if stripped.startswith("\\\\"):
+        # UNC：\\wsl.localhost\Ubuntu\home\yoshix7ti\... → /home/yoshix7ti/...
+        parts = [p for p in stripped.replace("\\", "/").split("/") if p]
+        if parts and parts[0].lower() == "wsl.localhost":
+            # parts = ['wsl.localhost', '<发行版名>', 'home', ...]
+            path = "/" + "/".join(parts[2:])
+    elif stripped.startswith("/"):
+        path = stripped
+
+    if path is None:
+        return value
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read()
+    except OSError as e:
+        raise ValueError(
+            f"读不了归档素材文件 {path}：{e.strerror or e}"
+        ) from e
+
+
+def _infer_title_from_path(value: str) -> str:
+    """从文件路径推断场景标题：/path/to/sunday_note_0927.md → sunday_note_0927。"""
+    name = value.strip().replace("\\", "/").rstrip("/").split("/")[-1]
+    if "." in name:
+        name = name.rsplit(".", 1)[0]
+    return name
+
+
+@write_tool()
+async def archive_history(
+    title: str = "",
+    history: str = "",
     mode: str = "char",
     raw: Optional[str] = None,
     time: Optional[str] = None,
     character_id: str = "",
 ) -> ToolResult | ArchiveResult:
-    """把刚才发生的事存档到历史记录里。
+    """把刚才发生的事记录到历史记录（history 域）。
 
     每轮对话或场景结束后，用这个工具把发生了什么记到 history 域。
     之后就可以通过「system://wakeup」来回想最近发生的事。
 
+    history 和 raw 可以直接传内容，也可以传素材文件路径——GM 的场景
+    笔记可以直接投喂，不用手写内容。路径两种写法都认：
+      - WSL 绝对路径：/home/yoshix7ti/world/.pi/extensions/magnolia/export/history/elias/sunday_note_0927.md
+      - Windows UNC 路径：\\\\wsl.localhost\\Ubuntu\\home\\yoshix7ti\\world\\…（自动转换）
+    以 "\\\\" 或 "/" 开头的值视为文件路径读取，其余按字面内容处理。
+    title 留空时自动取文件名（去掉扩展名）。
+
+    注意：这是「记录新场景」的工具，不是「归档旧记忆」的工具。
+    想把已有的记忆移进 archive 域留档，请用 move_memory（如
+    move_memory("core://old_thing", "archive://old_thing")）。
+
     Args:
-        title: 场景的简短标题（如 "tavern_brawl" 或 "meet_tina"）。
-               只能包含字母、数字、下划线和连字符。这会成为记忆的路径。
-        history: 场景摘要。整理过的、这段场景里发生了什么。
+        title: 场景的简短标题（如 "sunday_note_0927" 或 "tavern_brawl"）。
+               只能包含字母、数字、下划线和连字符。留空时从 history 文件
+               路径推断。
+        history: 场景摘要内容，或摘要文件的路径。
         mode: "char"（角色视角）或 "gm"（GM视角），默认 "char"。
-        raw: 原始记录。可选，完整的对话或事件记录。
+        raw: 原始记录内容或文件路径。可选。
         time: 可选。存档对应的世界时间（如 "2024-06-01" 或 "-1d"）。默认使用当前世界时间。
     """
     graph = get_graph_service()
@@ -1427,11 +2133,40 @@ async def archive_memory(
             import re
             namespace = get_namespace()
 
-            if not history.strip():
-                return ToolResult(message="history 不能为空。写一下刚才发生了什么。")
-            
-            if not title or not re.match(r"^[a-zA-Z0-9_-]+$", title):
-                return ToolResult(message="title 必须提供，且只能包含字母、数字、连字符和下划线（如 'first_encounter'）。")
+            resolved_history = _resolve_content_or_path(history)
+            if not resolved_history.strip():
+                return ToolResult(
+                    message="history 不能为空。写一下刚才发生了什么，或传一个场景摘要文件的路径。"
+                )
+
+            if not title:
+                resolved_title = _infer_title_from_path(history)
+            else:
+                resolved_title = title
+            if not resolved_title or not re.match(r"^[a-zA-Z0-9_-]+$", resolved_title):
+                return ToolResult(
+                    message="title 必须提供，且只能包含字母、数字、连字符和下划线（如 'first_encounter'）。"
+                )
+
+            resolved_raw = _resolve_content_or_path(raw) if raw else None
+
+            # 确保 scenes 容器存在（新 namespace 首次归档时自动创建）
+            for container_domain in ("history", "history_raw"):
+                if container_domain == "history_raw" and not (resolved_raw and resolved_raw.strip()):
+                    continue
+                existing = await graph.get_memory_by_path(
+                    "scenes", container_domain, namespace=namespace
+                )
+                if not existing:
+                    await graph.create_memory(
+                        parent_path="",
+                        content="",
+                        priority=8,
+                        title="scenes",
+                        disclosure="",
+                        domain=container_domain,
+                        namespace=namespace,
+                    )
 
             # --- 世界时间处理 ---
             config = get_config()
@@ -1449,28 +2184,28 @@ async def archive_memory(
             # 写入 history 域（统一放在 scenes/ 目录下保持整洁）
             await graph.create_memory(
                 parent_path="scenes",
-                content=history,
+                content=resolved_history,
                 priority=5,
-                title=title,
+                title=resolved_title,
                 disclosure="当回顾最近经历时",
                 domain="history",
                 namespace=namespace,
                 world_timestamp=final_world_time, 
             )
 
-            if raw and raw.strip():
+            if resolved_raw and resolved_raw.strip():
                 await graph.create_memory(
                     parent_path="scenes",
-                    content=raw,
+                    content=resolved_raw,
                     priority=5,
-                    title=f"{title}_raw",
+                    title=f"{resolved_title}_raw",
                     disclosure="",
                     domain="history_raw",
                     namespace=namespace,
                     world_timestamp=final_world_time, 
                 )
 
-            msg = f"场景已存档（{mode}）：history://scenes/{title}"
+            msg = f"场景已存档（{mode}）：history://scenes/{resolved_title}"
             if final_world_time:
                 msg += f" (世界时间: {final_world_time})"
             
@@ -1481,7 +2216,7 @@ async def archive_memory(
             return ArchiveResult(
                 message=msg,
                 revision_id=rev_id,
-                uri=f"history://scenes/{title}",
+                uri=f"history://scenes/{resolved_title}",
             )
         
         if character_id:

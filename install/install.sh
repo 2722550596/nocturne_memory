@@ -17,11 +17,12 @@ mkdir -p "$EXT_DIR" "$PRE_DIR"
 # 2. Process and Install Extensions
 echo "==> Installing Extensions..."
 
-# Extensions with {{MEMORY_DIR}}/{{PI_AGENT_DIR}} placeholders get them
-# substituted with the real project / agent dir paths.
+# Extensions with {{MEMORY_DIR}}/{{MEMORY_API}}/{{PI_AGENT_DIR}} placeholders get
+# them substituted with the real project / API base URL / agent dir paths.
+MEMORY_API="${NOCTURNE_MEMORY_API:-http://127.0.0.1:8233}"
 for ext in nocturne-memory.ts nocturne-memory-recall.ts; do
     TMP_EXT=$(mktemp)
-    sed -e "s|{{MEMORY_DIR}}|${PROJECT_DIR}|g" -e "s|{{PI_AGENT_DIR}}|${PI_AGENT}|g" \
+    sed -e "s|{{MEMORY_DIR}}|${PROJECT_DIR}|g" -e "s|{{MEMORY_API}}|${MEMORY_API}|g" -e "s|{{PI_AGENT_DIR}}|${PI_AGENT}|g" \
         "${INSTALL_DIR}/extensions/${ext}" > "$TMP_EXT"
     if [ ! -f "${EXT_DIR}/${ext}" ]; then
         cp "$TMP_EXT" "${EXT_DIR}/${ext}"

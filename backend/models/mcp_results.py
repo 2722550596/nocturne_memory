@@ -54,5 +54,5 @@ class TagResult(ToolResult):
 
 
 class ArchiveResult(ToolResult):
-    """archive_memory records a scene to the history domain."""
+    """archive_history records a scene to the history domain."""
     uri: str = Field(..., description="存档后的 URI，如 history://scenes/title")

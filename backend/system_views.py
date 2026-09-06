@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import config as _cfg
 from db import get_graph_service, get_glossary_service
+from db.models import PLACEHOLDER_CONTENT
 from db.namespace import get_namespace
 from locales import t
 import re
@@ -533,10 +534,16 @@ async def _format_recent_domain_clean(domain: str, ns: str, graph, limit: int) -
 
 
 async def _format_recent_core_index_clean(ns: str, graph, limit: int = 5) -> List[str]:
-    """Recent core memories as compact index lines."""
+    """Recent core memories as compact index lines.
+
+    get_all_paths() already joins the Memory row (content, created_at) and the
+    Edge row (disclosure), so sorting and snippets build entirely from the
+    listing result. The old per-item get_memory_by_path loop was N+1 over
+    every core memory (~1s for 116 items) and dominated the boot-slot render.
+    """
     from mcp_server import make_uri, DEFAULT_DOMAIN
     all_paths = await graph.get_all_paths(namespace=ns)
-    
+
     # Deduplicate by node_uuid
     core_items = []
     seen = set()
@@ -548,32 +555,26 @@ async def _format_recent_core_index_clean(ns: str, graph, limit: int = 5) -> Lis
             continue
         seen.add(nid)
         core_items.append(item)
-    
-    # Fetch details for sorting
+
     detailed = []
     for item in core_items:
-        try:
-            p = item.get("path", "")
-            uri = item.get("uri") or make_uri("core", p)
-            detail = await graph.get_memory_by_path(p, "core", namespace=ns)
-            if detail:
-                detailed.append({
-                    "uri": uri,
-                    "disclosure": detail.get("disclosure"),
-                    "content_snippet": (detail.get("content", "") or "").replace("\n", " ").strip()[:120],
-                    "created_at": detail.get("created_at", ""),
-                })
-        except Exception:
-            continue
-    
+        p = item.get("path", "")
+        uri = item.get("uri") or make_uri("core", p)
+        detailed.append({
+            "uri": uri,
+            "disclosure": item.get("disclosure"),
+            "content_snippet": (item.get("content", "") or "").replace("\n", " ").strip()[:120],
+            "created_at": item.get("created_at", "") or "",
+        })
+
     detailed.sort(key=lambda x: x.get("created_at") or "", reverse=True)
-    
+
     lines: List[str] = []
     for entry in detailed[:limit]:
         disc = f" ({entry['disclosure']})" if entry.get("disclosure") else ""
         snippet = f" — {entry['content_snippet']}" if entry.get("content_snippet") else ""
         lines.append(f"- {entry['uri']}{disc}{snippet}")
-    
+
     return lines
 
 def _deduplicate_boot_content(blocks: List[str], boot_uris: List[str] = None) -> List[str]:
@@ -674,8 +675,10 @@ async def generate_diagnostic_view(domain: str, days_stale: int = 30, max_childr
         crowded_nodes = diagnostics.get("crowded_nodes", [])
         orphaned_nodes = diagnostics.get("orphaned_nodes", [])
         duplicate_aliases = diagnostics.get("duplicate_aliases", [])
+        placeholder_nodes = diagnostics.get("placeholder_nodes", [])
 
-        if not stale_nodes and not crowded_nodes and not orphaned_nodes and not duplicate_aliases:
+        if not (stale_nodes or crowded_nodes or orphaned_nodes
+                or duplicate_aliases or placeholder_nodes):
             return "No issues found. Memory system is healthy."
 
         lines = [
@@ -721,17 +724,34 @@ async def generate_diagnostic_view(domain: str, days_stale: int = 30, max_childr
                 lines.append(f"{i}. {node['uri']} ({node['child_count']} children)")
             lines.append("")
 
+        if placeholder_nodes:
+            lines.extend([
+                "## 3. Placeholder Parents Awaiting Write-back",
+                f"Nodes still holding 「{PLACEHOLDER_CONTENT}」. They were auto-created as",
+                "missing parents so a child memory could be stored; their real content",
+                "was never written. Children hang off a stub, so they surface less",
+                "reliably until the parent says what it is about.",
+                "Use `edit_memory(uri=..., new_text=\"...\")` to fill each one in.",
+                ""
+            ])
+            for i, node in enumerate(placeholder_nodes, 1):
+                children = node["child_count"]
+                suffix = f"{children} 条记忆挂在下面" if children else "还没有挂任何记忆"
+                created = node['created_at'][:10] if node.get('created_at') else 'Unknown'
+                lines.append(f"{i}. {node['uri']} — {suffix} | Created: {created}")
+            lines.append("")
+
         if orphaned_nodes or duplicate_aliases:
             lines.extend([
-                "## 3. Anomaly Diagnostics",
+                "## 4. Anomaly Diagnostics",
                 ""
             ])
 
             if orphaned_nodes:
                 lines.extend([
-                    "### 3.1 Orphaned Nodes",
+                    "### 4.1 Orphaned Nodes",
                     "Nodes whose parent path no longer exists (broken path chain).",
-                    "Use `browse_memory` with the URI to inspect, then `link_memory` to re-parent or `forget_memory` to remove."
+                    "Use `browse_memory` with the URI to inspect, then `link_memory` to re-parent or `forget_memory` to remove.",
                     ""
                 ])
                 for i, node in enumerate(orphaned_nodes, 1):
@@ -744,10 +764,10 @@ async def generate_diagnostic_view(domain: str, days_stale: int = 30, max_childr
 
             if duplicate_aliases:
                 lines.extend([
-                    "### 3.2 Duplicate Aliases under Same Parent",
+                    "### 4.2 Duplicate Aliases under Same Parent",
                     "A single node has multiple alias paths under the same parent node.",
                     "Usually caused by accidentally inserting another alias when one already exists.",
-                    "Use `forget_memory` on the redundant alias URI to remove the extra path."
+                    "Use `forget_memory` on the redundant alias URI to remove the extra path.",
                     ""
                 ])
                 for i, item in enumerate(duplicate_aliases, 1):

@@ -33,6 +33,12 @@ Base = declarative_base()
 # Using a fixed UUID instead of NULL avoids SQLite's NULL != NULL uniqueness quirk.
 ROOT_NODE_UUID = "00000000-0000-0000-0000-000000000000"
 
+# Content written into stub parent nodes auto-created by the remember tools.
+# Scanned by system://diagnostic to list parents awaiting a real write-back.
+# Matching is exact on this literal, so a user typing the same text by hand
+# counts as a placeholder too — acceptable, and it keeps this migration-free.
+PLACEHOLDER_CONTENT = "（记得补充）"
+
 
 # =============================================================================
 # Shared Utilities
