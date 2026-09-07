@@ -13,11 +13,44 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type, type TSchema } from "typebox";
 import { StringEnum } from "@earendil-works/pi-ai";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
+// ── Machine-independent config ─────────────────────────────────────────────
+
+// All machine-specific settings live in one JSON file next to these
+// extensions: <agent-dir>/extensions/nocturne-memory.config.json (override
+// the location with NOCTURNE_CONFIG_PATH). Precedence per key: environment
+// variable > config file > built-in default. This replaces the old
+// install-time {{PLACEHOLDER}} substitution, which silently baked one
+// machine's paths into the extension files.
+interface NocturneExtConfig {
+	memoryDir?: string;
+	piAgentDir?: string;
+	apiBaseUrl?: string;
+	apiToken?: string;
+	embeddingApiKey?: string;
+}
+
+const EXT_CONFIG_PATH =
+	process.env.NOCTURNE_CONFIG_PATH?.trim() ||
+	join(process.env.HOME ?? "", ".pi", "agent", "extensions", "nocturne-memory.config.json");
+
+function loadExtConfig(): NocturneExtConfig {
+	try {
+		return JSON.parse(readFileSync(EXT_CONFIG_PATH, "utf-8")) as NocturneExtConfig;
+	} catch {
+		return {};
+	}
+}
+
+const EXT_CFG = loadExtConfig();
 
 // ── Config ──────────────────────────────────────────────────────────────────
 
-const MEMORY_API = process.env.NOCTURNE_MEMORY_API ?? "http://127.0.0.1:8233";
-const API_TOKEN = process.env.NOCTURNE_API_TOKEN ?? "";
+const MEMORY_API =
+	process.env.NOCTURNE_MEMORY_API?.trim() || EXT_CFG.apiBaseUrl || "http://127.0.0.1:8233";
+const API_TOKEN = process.env.NOCTURNE_API_TOKEN || EXT_CFG.apiToken || "";
 
 // ── Invoke helper ───────────────────────────────────────────────────────────
 

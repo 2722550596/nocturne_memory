@@ -1,12 +1,45 @@
 import type { ExtensionAPI, SlotRenderContext } from "@earendil-works/pi-coding-agent";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
+// ── Machine-independent config ─────────────────────────────────────────────
+
+// All machine-specific settings live in one JSON file next to these
+// extensions: <agent-dir>/extensions/nocturne-memory.config.json (override
+// the location with NOCTURNE_CONFIG_PATH). Precedence per key: environment
+// variable > config file > built-in default. This replaces the old
+// install-time {{PLACEHOLDER}} substitution, which silently baked one
+// machine's paths into the extension files.
+interface NocturneExtConfig {
+	memoryDir?: string;
+	piAgentDir?: string;
+	apiBaseUrl?: string;
+	apiToken?: string;
+	embeddingApiKey?: string;
+}
+
+const EXT_CONFIG_PATH =
+	process.env.NOCTURNE_CONFIG_PATH?.trim() ||
+	join(process.env.HOME ?? "", ".pi", "agent", "extensions", "nocturne-memory.config.json");
+
+function loadExtConfig(): NocturneExtConfig {
+	try {
+		return JSON.parse(readFileSync(EXT_CONFIG_PATH, "utf-8")) as NocturneExtConfig;
+	} catch {
+		return {};
+	}
+}
+
+const EXT_CFG = loadExtConfig();
 
 // ── Config ──────────────────────────────────────────────────────────────────
 
 
 // Same backend the native tools extension calls, so the /set-world-time command
 // shares one code path with the set_world_time tool (isolated by namespace).
-const MEMORY_API = process.env.NOCTURNE_MEMORY_API ?? "http://127.0.0.1:8233";
-const API_TOKEN = process.env.NOCTURNE_API_TOKEN ?? "";
+const MEMORY_API =
+	process.env.NOCTURNE_MEMORY_API?.trim() || EXT_CFG.apiBaseUrl || "http://127.0.0.1:8233";
+const API_TOKEN = process.env.NOCTURNE_API_TOKEN || EXT_CFG.apiToken || "";
 
 /** Call the Nocturne memory backend like the set_world_time tool does. */
 async function setWorldTime(
@@ -43,12 +76,13 @@ async function setWorldTime(
 
 /**
  * Render a memory slot through the long-lived backend server
- * (POST /api/pi-tools/slot). The server keeps the Python runtime warm, so a
+ * (POST /api/pi-tools/slot). pi-rp 0.84.2+ supports async slots: the compiler
+ * detects `async: true` on the SlotDefinition and uses the async compile
+ * path (parallel rendering). The server keeps the Python runtime warm, so a
  * slot render costs milliseconds instead of a full venv cold start per call
- * (the previous execSync query_slot.py path measured ~3s per render, which
- * made every preset compile pay 5s+).
+ * (the previous execSync query_slot.py path measured ~3s per render).
  */
-async function queryMemorySlot(slotType: string, namespace: string = "default"): Promise<string> {
+async function queryMemorySlot(slotType: string, namespace: string): Promise<string> {
   try {
     const res = await fetch(`${MEMORY_API}/api/pi-tools/slot`, {
       method: "POST",
@@ -104,36 +138,39 @@ export default function nocturneMemoryExtension(pi: ExtensionAPI): void {
     },
   });
 
-  // Register Boot Slot (async: renders via the warm memory API server)
+  // Register Boot Slot (async: pi-rp 0.84.2+ async compile path)
   pi.registerSlot({
     name: "nocturne-memory-boot",
     description: "Initial memory boot content from Nocturne Memory",
     async: true,
     render: (ctx: SlotRenderContext): Promise<string> => {
-      const ns = (ctx.item.options?.namespace as string) || "default";
+      const opts = ctx.item.options as { namespace?: string } | undefined;
+      const ns = opts?.namespace?.trim() || process.env.NOCTURNE_NAMESPACE?.trim() || "";
       return queryMemorySlot("boot", ns);
     },
   });
 
-  // Register History Slot (async: renders via the warm memory API server)
+  // Register History Slot (async: pi-rp 0.84.2+ async compile path)
   pi.registerSlot({
     name: "nocturne-memory-history",
     description: "Recent conversation history summaries from Nocturne Memory",
     async: true,
     render: (ctx: SlotRenderContext): Promise<string> => {
-      const ns = (ctx.item.options?.namespace as string) || "default";
+      const opts = ctx.item.options as { namespace?: string } | undefined;
+      const ns = opts?.namespace?.trim() || process.env.NOCTURNE_NAMESPACE?.trim() || "";
       return queryMemorySlot("history", ns);
     },
   });
 
 
-  // Register State Slot (async: renders via the warm memory API server)
+  // Register State Slot (async: pi-rp 0.84.2+ async compile path)
   pi.registerSlot({
     name: "nocturne-memory-state",
     description: "Current state/scene records from Nocturne Memory",
     async: true,
     render: (ctx: SlotRenderContext): Promise<string> => {
-      const ns = (ctx.item.options?.namespace as string) || "default";
+      const opts = ctx.item.options as { namespace?: string } | undefined;
+      const ns = opts?.namespace?.trim() || process.env.NOCTURNE_NAMESPACE?.trim() || "";
       return queryMemorySlot("state", ns);
     },
   });
@@ -178,7 +215,7 @@ export default function nocturneMemoryExtension(pi: ExtensionAPI): void {
 
     if (targetRevId != null) {
       try {
-        const res = await fetch(`http://127.0.0.1:8233/review/revisions/${targetRevId}/checkout`, {
+        const res = await fetch(`${MEMORY_API}/review/revisions/${targetRevId}/checkout`, {
           method: "POST",
         });
         if (!res.ok) {

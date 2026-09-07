@@ -1,0 +1,23 @@
+[Unit]
+Description=Nocturne Memory backend (MCP + REST API + frontend, pi integration)
+# Serves REST API + MCP (SSE/streamable HTTP) + admin UI on 127.0.0.1:8233,
+# which the nocturne-*.ts pi extensions call via /api/pi-tools/*.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# {{MEMORY_DIR}} is substituted by install/install.sh with the real path.
+WorkingDirectory={{MEMORY_DIR}}
+ExecStart={{MEMORY_DIR}}/venv/bin/python ./backend/run_sse.py
+Restart=on-failure
+RestartSec=3
+# config.json sets auto_open_browser=true; without this every restart spawns a
+# browser via webbrowser.open. /bin/true makes that a no-op for the service.
+Environment=BROWSER=/bin/true
+Environment=LANG=C.UTF-8
+# Backend listens on 127.0.0.1 only (config.json host); no network exposure.
+# Optional: add NOCTURNE_EMBEDDING_API_KEY here to enable vector embeddings.
+
+[Install]
+WantedBy=default.target

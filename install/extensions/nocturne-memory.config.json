@@ -1,0 +1,7 @@
+{
+  "memoryDir": "{{MEMORY_DIR}}",
+  "piAgentDir": "{{PI_AGENT_DIR}}",
+  "apiBaseUrl": "{{MEMORY_API}}",
+  "apiToken": "{{API_TOKEN}}",
+  "embeddingApiKey": "{{EMBEDDING_API_KEY}}"
+}

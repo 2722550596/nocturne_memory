@@ -4,11 +4,46 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 
+// ── Machine-independent config ─────────────────────────────────────────────
+
+// All machine-specific settings live in one JSON file next to these
+// extensions: <agent-dir>/extensions/nocturne-memory.config.json (override
+// the location with NOCTURNE_CONFIG_PATH). Precedence per key: environment
+// variable > config file > built-in default. This replaces the old
+// install-time {{PLACEHOLDER}} substitution, which silently baked one
+// machine's paths into the extension files.
+interface NocturneExtConfig {
+	memoryDir?: string;
+	piAgentDir?: string;
+	apiBaseUrl?: string;
+	apiToken?: string;
+	embeddingApiKey?: string;
+}
+
+const EXT_CONFIG_PATH =
+	process.env.NOCTURNE_CONFIG_PATH?.trim() ||
+	join(process.env.HOME ?? "", ".pi", "agent", "extensions", "nocturne-memory.config.json");
+
+function loadExtConfig(): NocturneExtConfig {
+	try {
+		return JSON.parse(readFileSync(EXT_CONFIG_PATH, "utf-8")) as NocturneExtConfig;
+	} catch {
+		return {};
+	}
+}
+
+const EXT_CFG = loadExtConfig();
+
 // ── Config ──────────────────────────────────────────────────────────────────
 
-// The installation script will replace these placeholders with actual paths.
-const MEMORY_DIR = "/home/yoshix7ti/projects/nocturne_memory";
-const PI_AGENT_DIR = "/home/yoshix7ti/.pi/agent";
+// Paths come from nocturne-memory.config.json (NOCTURNE_MEMORY_DIR /
+// NOCTURNE_PI_AGENT_DIR env overrides win). Empty => recall no-ops.
+const MEMORY_DIR = process.env.NOCTURNE_MEMORY_DIR?.trim() || EXT_CFG.memoryDir || "";
+const PI_AGENT_DIR = process.env.NOCTURNE_PI_AGENT_DIR?.trim() || EXT_CFG.piAgentDir || "";
+
+if (!MEMORY_DIR) {
+	console.error("[nocturne-recall] nocturne-memory.config.json missing or no memoryDir — recall disabled.");
+}
 
 // Extension id for persisted configuration (Settings.extensionSettings).
 // Auto-recall defaults to ON; set "autoRecall": false via /recall off to disable.
@@ -45,7 +80,7 @@ const DB_PATH = resolveDbPath();
 // embed() returns null and recall degrades to keyword-only mode.
 const EMBEDDING_MODEL = "BAAI/bge-large-zh-v1.5";
 const EMBEDDING_API_URL = "https://api.siliconflow.cn/v1";
-const EMBEDDING_API_KEY = process.env.NOCTURNE_EMBEDDING_API_KEY ?? "";
+const EMBEDDING_API_KEY = process.env.NOCTURNE_EMBEDDING_API_KEY || EXT_CFG.embeddingApiKey || "";
 // Official query instruction for bge-*-zh-v1.5 retrieval (BAAI README):
 // prepend to SHORT QUERIES only, never to passages/documents.
 const QUERY_INSTRUCTION = "为这个句子生成表示以用于检索相关文章：";
