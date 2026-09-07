@@ -331,3 +331,124 @@ async def test_diagnostic_healthy_when_no_placeholders(mcp_module):
 
     assert "Placeholder Parents" not in text
     assert "（记得补充）" not in text
+
+
+# =============================================================================
+# 并发交错（真实事故：同一轮并行写 core://events 与 core://events/lucas）
+# =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_child_stub_loses_race_to_real_parent(mcp_module, graph_service, monkeypatch):
+    """子调用的占位写输掉竞窗：并发方已建成真父节点，链应静默补齐。"""
+    await graph_service.create_memory(
+        parent_path="", content="真实的 events 内容", priority=3, title="events", disclosure="",
+    )
+    original = graph_service.get_memory_by_path
+    calls = {"n": 0}
+
+    async def flaky(path, domain="core", namespace=""):
+        calls["n"] += 1
+        if calls["n"] == 1 and path == "events":
+            return None  # 模拟检查发生在并发方 commit 之前
+        return await original(path, domain, namespace=namespace)
+
+    monkeypatch.setattr(graph_service, "get_memory_by_path", flaky)
+    result = await mcp_module.remember_memory("core://events/lucas", "子的内容")
+    monkeypatch.undo()
+
+    assert "已记下记忆" in result
+    parent = await original("events")
+    assert parent["content"] == "真实的 events 内容"  # 占位没顶掉真内容
+    child = await original("events/lucas")
+    assert child["content"] == "子的内容"
+
+
+@pytest.mark.asyncio
+async def test_child_stub_loses_insert_race(mcp_module, graph_service, monkeypatch):
+    """占位 INSERT 撞 UNIQUE（事故日志里的原始形态）也不该让调用失败。"""
+    from sqlalchemy.exc import IntegrityError
+
+    await graph_service.create_memory(
+        parent_path="", content="真实的 events 内容", priority=3, title="events", disclosure="",
+    )
+    original = graph_service.get_memory_by_path
+    orig_create = graph_service.create_memory
+    calls = {"n": 0}
+    raised = {"done": False}
+
+    async def flaky(path, domain="core", namespace=""):
+        calls["n"] += 1
+        if calls["n"] == 1 and path == "events":
+            return None
+        return await original(path, domain, namespace=namespace)
+
+    async def create_with_unique_violation(*args, **kwargs):
+        if not raised["done"] and kwargs.get("content") == "（记得补充）":
+            raised["done"] = True
+            raise IntegrityError(
+                "INSERT INTO paths ...", None,
+                Exception("UNIQUE constraint failed: paths.namespace, paths.domain, paths.path"),
+            )
+        return await orig_create(*args, **kwargs)
+
+    monkeypatch.setattr(graph_service, "get_memory_by_path", flaky)
+    monkeypatch.setattr(graph_service, "create_memory", create_with_unique_violation)
+    result = await mcp_module.remember_memory("core://events/lucas", "子的内容")
+    monkeypatch.undo()
+
+    assert "已记下记忆" in result, result
+    parent = await original("events")
+    assert parent["content"] == "真实的 events 内容"
+    child = await original("events/lucas")
+    assert child["content"] == "子的内容"
+
+
+@pytest.mark.asyncio
+async def test_real_write_upgrades_stub(mcp_module, graph_service):
+    """反向交错（顺序形态）：先写子（垫了占位父），再正式写父 → 升级而非报错。"""
+    await mcp_module.remember_memory("core://events/lucas", "子的内容")
+    stub = await graph_service.get_memory_by_path("events")
+    assert stub["content"] == "（记得补充）"
+
+    result = await mcp_module.remember_memory("core://events", "父的真实内容", time="2007-10-28")
+    assert "已记下记忆" in result
+    assert "占位" in result  # 明确告诉模型占位已被替换
+
+    parent = await graph_service.get_memory_by_path("events")
+    assert parent["content"] == "父的真实内容"
+    assert parent["priority"] == 5  # 占位的次要优先级 8 被真值顶掉
+    child = await graph_service.get_memory_by_path("events/lucas")
+    assert child["content"] == "子的内容"  # 子节点毫发无损
+
+
+@pytest.mark.asyncio
+async def test_real_conflict_still_errors(mcp_module, graph_service):
+    """撞上真实内容（非占位）依然是错误，升级逻辑绝不静默覆盖真数据。"""
+    await graph_service.create_memory(
+        parent_path="", content="原来的内容", priority=3, title="events", disclosure="",
+    )
+    result = await mcp_module.remember_memory("core://events", "新的内容")
+    assert "记录失败" in result
+    node = await graph_service.get_memory_by_path("events")
+    assert node["content"] == "原来的内容"
+
+
+@pytest.mark.asyncio
+async def test_parallel_parent_and_child_writes(mcp_module, graph_service):
+    """端到端并发：父+子同一轮并行写，无论交错顺序，终态必须一致。"""
+    import asyncio
+
+    for i in range(5):
+        parent_msg, child_msg = await asyncio.gather(
+            mcp_module.remember_memory(f"core://ev{i}", f"父内容{i}"),
+            mcp_module.remember_memory(f"core://ev{i}/lucas", f"子内容{i}"),
+        )
+
+        assert "已记下记忆" in parent_msg, parent_msg
+        assert "已记下记忆" in child_msg, child_msg
+
+        parent = await graph_service.get_memory_by_path(f"ev{i}")
+        assert parent is not None and parent["content"] == f"父内容{i}"
+        child = await graph_service.get_memory_by_path(f"ev{i}/lucas")
+        assert child is not None and child["content"] == f"子内容{i}"

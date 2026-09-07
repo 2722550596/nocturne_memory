@@ -40,6 +40,7 @@ from models.mcp_results import (
     LinkResult, TagResult, ArchiveResult
 )
 from db.models import PLACEHOLDER_CONTENT
+from sqlalchemy.exc import IntegrityError
 from text_patch import (
     normalize_with_positions,
     find_valid_matches,
@@ -393,7 +394,11 @@ async def _ensure_parent_chain(
     让子节点能立刻落地。占位节点内容是 PLACEHOLDER_CONTENT，调用方
     需要在返回给模型的结果里提醒稍后回写真实内容。
 
-    返回新建的占位路径列表（由浅到深）；祖先已齐全时返回空列表。
+    并发说明：模型常在同一轮里同时写父节点和子节点（如 core://events
+    与 core://events/lucas），两个请求都会走到这里。检查「父不存在」和
+    插入占位之间存在竞窗：并发方可能恰好在这中间插进了同一路径，让
+    create_memory 以 UNIQUE 冲突或 "already exists" 失败。这不视为错误——
+    只要插进去的那条确实是个节点，父链就算补齐了，继续往下走。
     """
     if not parent_path:
         return []
@@ -404,17 +409,80 @@ async def _ensure_parent_chain(
         current = f"{current}/{segment}" if current else segment
         if await graph.get_memory_by_path(current, domain, namespace=namespace):
             continue
-        await graph.create_memory(
-            parent_path=current.rsplit("/", 1)[0] if "/" in current else "",
-            content=PLACEHOLDER_CONTENT,
-            priority=8,
-            title=segment,
-            disclosure="",
-            domain=domain,
-            namespace=namespace,
-        )
-        created.append(current)
+        try:
+            await graph.create_memory(
+                parent_path=current.rsplit("/", 1)[0] if "/" in current else "",
+                content=PLACEHOLDER_CONTENT,
+                priority=8,
+                title=segment,
+                disclosure="",
+                domain=domain,
+                namespace=namespace,
+            )
+            created.append(current)
+        except (ValueError, IntegrityError):
+            # 并发方抢先建了这条路径。重读确认它真实存在（且不是我们
+            # 自己的写失败残影），存在即视为父链已补齐。
+            existing = await graph.get_memory_by_path(current, domain, namespace=namespace)
+            if not existing:
+                raise
     return created
+
+
+async def _create_or_upgrade_memory(
+    graph,
+    domain: str,
+    path: str,
+    content: str,
+    priority: int,
+    disclosure: Optional[str] = None,
+    namespace: str = "",
+    world_timestamp: Optional[str] = None,
+) -> Tuple[Dict[str, Any], bool]:
+    """创建记忆；目标路径被占位节点占着时，把真内容升级进去。
+
+    并发反例：模型同一轮同时写 core://events（真内容）和
+    core://events/lucas。若子节点那一路先把占位父链建完提交，
+    core://events 会先以占位形态落地，随后父节点那一路的
+    create_memory 就撞「already exists」，真内容直接丢失——比撞
+    UNIQUE 的另一方向严重得多。这里把碰撞接住：目标还是占位，
+    就用 update_memory 把真内容和优先级写进去（占位升级）；已有
+    真内容则原样报错，绝不静默覆盖。
+
+    返回 (create_memory 兼容的结果 dict, 是否发生了升级)。
+    """
+    if "/" in path:
+        parent_path, title = path.rsplit("/", 1)
+    else:
+        parent_path, title = "", path
+    try:
+        result = await graph.create_memory(
+            parent_path, content, priority=priority, title=title,
+            disclosure=disclosure, domain=domain, namespace=namespace,
+            world_timestamp=world_timestamp,
+        )
+        return result, False
+    except (ValueError, IntegrityError):
+        existing = await graph.get_memory_by_path(path, domain, namespace=namespace)
+        if not existing or existing.get("content") != PLACEHOLDER_CONTENT:
+            # 真的重复写入（或并发残影），按原语义报错。
+            raise
+        upgraded = await graph.update_memory(
+            path, content, priority=priority, disclosure=disclosure,
+            domain=domain, namespace=namespace,
+            world_timestamp=world_timestamp,
+        )
+        # 对齐 create_memory 的返回形状，调用方无须感知升级。
+        result = {
+            "id": upgraded.get("new_memory_id"),
+            "node_uuid": upgraded.get("node_uuid"),
+            "domain": domain,
+            "path": path,
+            "uri": f"{domain}://{path}",
+            "priority": priority,
+            "rows_after": upgraded.get("rows_after", {}),
+        }
+        return result, True
 
 
 async def _ensure_target_parent(graph, domain: str, path: str, namespace: str) -> Optional[str]:
@@ -720,15 +788,18 @@ async def remember_memory(uri: str, content: str, time: Optional[str] = None, ch
                 graph, domain, parent_path, get_namespace()
             )
 
-            result = await graph.create_memory(
-                parent_path, content, priority=5, title=title, domain=domain,
-                namespace=get_namespace(),
-                world_timestamp=final_world_time
+            result, upgraded = await _create_or_upgrade_memory(
+                graph, domain, full_path, content,
+                priority=5, namespace=get_namespace(),
+                world_timestamp=final_world_time,
             )
 
-            msg = f"已记下记忆: {uri}" + (f" (发生于 {final_world_time})" if final_world_time else "")
+            msg = f"已记下记忆: {result['uri']}" + (f" (发生于 {final_world_time})" if final_world_time else "")
+            if upgraded:
+                msg += "\n（并发写入时这条路径先被占位占住了，已把你的真实内容升级进去。）"
             msg += _format_placeholder_notice(domain, placeholders)
             return msg
+
 
         if character_id:
             async with namespace_scope(character_id):
@@ -852,15 +923,51 @@ async def remember_child_memory(
                     # 回退到全局当前时间
                     final_world_time = current_world_time
 
-            result = await graph.create_memory(
-                parent_path=parent_path,
-                content=content,
-                priority=importance,
-                title=title,
-                disclosure=when,
-                domain=domain,
-                namespace=get_namespace(),
-                world_timestamp=final_world_time, # 注入时间
+            if title:
+                # 具名子节点可能撞上并发占位（先写了它的子孙再回头写它），
+                # 走升级 helper；自动编号路径不会撞占位，直接建。
+                result, upgraded = await _create_or_upgrade_memory(
+                    graph, domain,
+                    f"{parent_path}/{title}" if parent_path else title,
+                    content, priority=importance, disclosure=when,
+                    namespace=get_namespace(),
+                    world_timestamp=final_world_time,
+                )
+            else:
+                result = await graph.create_memory(
+                    parent_path=parent_path,
+                    content=content,
+                    priority=importance,
+                    title=None,
+                    disclosure=when,
+                    domain=domain,
+                    namespace=get_namespace(),
+                    world_timestamp=final_world_time, # 注入时间
+                )
+                upgraded = False
+
+            created_uri = result.get("uri", make_uri(domain, result["path"]))
+            _record_rows(before_state={}, after_state=result.get("rows_after", {}))
+
+            db = get_db_manager()
+            async with db.session() as session:
+                rev_id = await commit_checkpoint(session)
+
+            msg = f"记住了：「{created_uri}」"
+            if final_world_time:
+                msg += f" (发生于 {final_world_time})"
+            if upgraded:
+                msg += "\n（这条路径此前是占位节点，已用你的内容升级，不必再回写它。）"
+
+            msg += _format_placeholder_notice(domain, placeholders)
+
+            if result.get("path"):
+                msg += f"\n\n新记的事已经放好了。你看看和它相关的其他记忆有没有什么要整理的？"
+            return CreateResult(
+                message=msg,
+                revision_id=rev_id,
+                node_uuid=result["node_uuid"],
+                uri=created_uri,
             )
 
             created_uri = result.get("uri", make_uri(domain, result["path"]))
@@ -1414,18 +1521,15 @@ async def merge_memories(
                 graph, target_domain, parent_path, namespace
             )
 
-            result = await graph.create_memory(
-                parent_path=parent_path,
-                content=content,
-                priority=3,
-                title=title_part,
-                disclosure="当需要回想合并后的事时",
-                domain=target_domain,
+            result, upgraded = await _create_or_upgrade_memory(
+                graph, target_domain, target_path, content,
+                priority=3, disclosure="当需要回想合并后的事时",
                 namespace=namespace,
             )
 
             target_node_uuid = result.get("node_uuid")
             created_uri = result.get("uri", make_uri(target_domain, result["path"]))
+
 
             # 3. 转移标签到目标节点
             if target_node_uuid and source_glossary_keywords:
@@ -1465,6 +1569,8 @@ async def merge_memories(
             if source_glossary_keywords:
                 transferred = len(set(source_glossary_keywords))
                 msg += f"\n转移了 {transferred} 个标签到新记忆"
+            if upgraded:
+                msg += "\n（目标路径此前是占位节点，已用合并内容升级，不必再回写它。）"
             msg += _format_placeholder_notice(target_domain, placeholders)
 
             db = get_db_manager()
@@ -1550,20 +1656,16 @@ async def organize_memory(
                 graph, target_domain, parent_path, namespace
             )
 
-            result = await graph.create_memory(
-                parent_path=parent_path,
-                content=content,
+            result, upgraded = await _create_or_upgrade_memory(
+                graph, target_domain, target_path, content,
                 priority=importance,
-                title=title_part,
                 disclosure=when or f"当说到{title_part}时",
-                domain=target_domain,
                 namespace=namespace,
             )
 
             target_node_uuid = result.get("node_uuid")
             topic_uri = result.get("uri", make_uri(target_domain, result["path"]))
 
-            # 2. 给主题加标签
             if tags and target_node_uuid:
                 for kw in tags:
                     kw = kw.strip()
@@ -1632,6 +1734,8 @@ async def organize_memory(
             if tags:
                 msg_parts.append(f"  标签：{', '.join(tags)}")
 
+            if upgraded:
+                msg_parts.append("  主题路径此前是占位节点，已用本次内容升级，不必再回写它。")
             notice = _format_placeholder_notice(target_domain, placeholders)
             if notice:
                 msg_parts.append(notice.lstrip("\n"))
