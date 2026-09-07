@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "id": "elias-chat",
-  "name": "Elias Chat",
+  "id": "elias-chat-thinking-prefill",
+  "name": "Elias Chat 预填充",
   "tools": {
     "allow": [
       "intercom",
@@ -135,7 +135,7 @@
     {
       "kind": "block",
       "id": "thinking-prefill",
-      "enabled": false,
+      "enabled": true,
       "name": "预填充思维链",
       "role": "assistant",
       "content": "<thinking>嗯……让我想想接下来做什么。"
