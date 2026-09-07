@@ -169,7 +169,7 @@ const TOOLS: MemoryToolDef[] = [
 		name: "edit_memory",
 		label: "编辑记忆",
 		description:
-			"修改一段记忆的内容。三种方式三选一：替换（old_text→new_text，old_text 须唯一）、追加（append）、行编辑（line+line_content）。也可只改 importance/when/time。",
+			"修改一段记忆的内容。三种方式三选一：替换（old_text→new_text，old_text 须唯一）、追加（append）、行编辑（line+line_content）。也可只改 importance/when/time（time 传 \"\" 清除该记忆的世界时间）。",
 		parameters: Type.Object({
 			uri: Type.String({ description: "要修改的记忆 URI" }),
 			old_text: Type.Optional(Type.String({ description: "[替换] 要改掉的原文" })),
@@ -179,7 +179,7 @@ const TOOLS: MemoryToolDef[] = [
 			line_content: Type.Optional(Type.String({ description: "[行编辑] 该行新内容" })),
 			importance: Type.Optional(Type.Number({ description: "修改重要性" })),
 			when: Type.Optional(Type.String({ description: "修改想起条件" })),
-			time: Type.Optional(Type.String({ description: "修改世界时间" })),
+			time: Type.Optional(Type.String({ description: "修改世界时间；传 \"\" 清除时间" })),
 			character_id: Type.Optional(Type.String({ description: "角色 ID/namespace（记忆隔离），留空用当前会话" })),
 		}),
 	},
@@ -298,13 +298,13 @@ const TOOLS: MemoryToolDef[] = [
 		name: "batch_edit_memories",
 		label: "批量编辑",
 		description:
-			"批量修改一组记忆的元数据或追加内容。适合全库重分级（importance 0-10）、批量改想起条件（when）、批量补时间（time）等维护操作。append 是往每条内容末尾追加同一段文字。至少提供一种修改。dry_run=true 只预览每条当前值 → 将改为什么。",
+			"批量修改一组记忆的元数据或追加内容。适合全库重分级（importance 0-10）、批量改想起条件（when）、批量补/删时间（time 传 \"\" 批量清除）等维护操作。append 是往每条内容末尾追加同一段文字。至少提供一种修改。dry_run=true 只预览每条当前值 → 将改为什么。",
 		parameters: Type.Object({
 			uris: Type.Array(Type.String(), { description: "要修改的 URI 列表" }),
 			importance: Type.Optional(Type.Number({ description: "新的重要性（0=最重要，数字越大越次要）" })),
 			when: Type.Optional(Type.String({ description: "新的想起条件" })),
 			append: Type.Optional(Type.String({ description: "追加到每条内容末尾的文字" })),
-			time: Type.Optional(Type.String({ description: "新的世界时间 YYYY-MM-DD 或相对位移如 -1d" })),
+			time: Type.Optional(Type.String({ description: "新的世界时间 YYYY-MM-DD 或相对位移如 -1d；传 \"\" 批量清除" })),
 			dry_run: Type.Optional(Type.Boolean({ description: "True 只预览当前值 → 将改为什么，不执行" })),
 			character_id: Type.Optional(Type.String({ description: "角色 ID/namespace（记忆隔离），留空用当前会话" })),
 		}),
