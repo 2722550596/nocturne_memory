@@ -7,8 +7,20 @@ import { dirname, join } from "node:path";
 // ── Config ──────────────────────────────────────────────────────────────────
 
 // The installation script will replace these placeholders with actual paths.
-const MEMORY_DIR = "{{MEMORY_DIR}}";
-const PI_AGENT_DIR = "{{PI_AGENT_DIR}}";
+const MEMORY_DIR = "/home/yoshix7ti/projects/nocturne_memory";
+const PI_AGENT_DIR = "/home/yoshix7ti/.pi/agent";
+
+// Extension id for persisted configuration (Settings.extensionSettings).
+// Auto-recall defaults to ON; set "autoRecall": false via /recall off to disable.
+const EXT_ID = "nocturne-recall";
+const AUTO_RECALL_KEY = "autoRecall";
+
+// Domain (uri scheme) blocklist for recall. These domains are operational
+// noise (maintenance logs, raw session transcripts) that would pollute
+// retrieval results, so they are excluded by default. The list is persisted
+// under DOMAIN_BLOCKLIST_KEY and adjustable via `/recall domain add|remove`.
+const DEFAULT_DOMAIN_BLOCKLIST = ["maintenance", "history_raw"];
+const DOMAIN_BLOCKLIST_KEY = "domainBlocklist";
 
 const CONFIG_PATH = join(MEMORY_DIR, "config.json");
 
@@ -53,13 +65,6 @@ const HIGH_CONFIDENCE = 0.55;
 const DOC_COVERAGE_GAIN = 1.4;
 const MAX_SUMMARY_LEN = 80;
 
-// Query-vector cache TTL. Re-used prompts (/pi, /reroll, /tree + resend) hit
-// this cache and skip the embed API call entirely. A query's embedding is a
-// pure function of its text for a fixed model, so the only reason to expire
-// is to bound cache growth and flush vectors from a retired model. 7 days
-// covers same-day rerolls and any model swap within a week.
-const QUERY_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
-
 // BAAI/bge-large-zh-v1.5 max sequence is 512 tokens; ~1 zh char per token.
 // Truncate embedding inputs so long memories don't 400 the whole batch.
 // Long memories are chunked (see chunkText) with this overlap to keep
@@ -86,6 +91,46 @@ interface SearchDoc {
 
 function md5(text: string): string {
 	return createHash("md5").update(text, "utf-8").digest("hex");
+}
+
+/** Extract the domain (uri scheme) from a memory uri: "core://a/b" -> "core".
+ *  Uris without a scheme ("plain/path") return "" and never match a domain. */
+function uriDomain(uri: string): string {
+	const i = uri.indexOf("://");
+	return i > 0 ? uri.slice(0, i) : "";
+}
+
+/** Read the recall domain blocklist. Falls back to the defaults when the
+ *  setting is absent or malformed, so the maintenance/history_raw exclusion
+ *  holds even on a fresh install. An explicitly persisted empty list means
+ *  "no blocklist" (user removed every domain). */
+function getDomainBlocklist(ctx: ExtensionContext): string[] {
+	const cfg = ctx.getExtensionSetting<unknown>(EXT_ID, DOMAIN_BLOCKLIST_KEY);
+	if (Array.isArray(cfg)) {
+		return cfg.filter((d): d is string => typeof d === "string");
+	}
+	return [...DEFAULT_DOMAIN_BLOCKLIST];
+}
+
+/** Distinct domains actually present in the source DB (best-effort, for
+ *  autocomplete candidates). Returns [] when the DB is unavailable. */
+function listDomainsFromDb(): string[] {
+	if (!existsSync(DB_PATH)) return [];
+	try {
+		const db = new DatabaseSync(DB_PATH, { readOnly: true });
+		try {
+			const rows = db
+				.prepare(
+					"SELECT DISTINCT substr(uri, 1, instr(uri, '://') - 1) AS domain FROM search_documents WHERE instr(uri, '://') > 1",
+				)
+				.all() as Array<{ domain: string }>;
+			return rows.map((r) => r.domain).filter(Boolean);
+		} finally {
+			db.close();
+		}
+	} catch {
+		return [];
+	}
 }
 
 function readNamespaceFromMcp(filePath: string): string | null {
@@ -311,20 +356,6 @@ class VectorCache {
 				)
 			`);
 		}
-		// Query-vector cache: one row per exact query string (md5 key). This is
-		// the re-embed fast path for repeated prompts; unlike doc vectors it
-		// needs no content_hash (the query text IS the key) — TTL handles aging.
-		this.db.exec(`
-			CREATE TABLE IF NOT EXISTS query_embeddings (
-				query TEXT NOT NULL,
-				query_hash TEXT PRIMARY KEY,
-				vector TEXT NOT NULL,
-				updated_at INTEGER NOT NULL
-			)
-		`);
-		this.db
-			.prepare("DELETE FROM query_embeddings WHERE updated_at < ?")
-			.run(nowMs() - QUERY_CACHE_TTL_MS);
 	}
 
 	private get _db(): DatabaseSync {
@@ -398,60 +429,6 @@ class VectorCache {
 			const del = this._db.prepare("DELETE FROM embeddings WHERE uri = ?");
 			for (const { uri } of all) {
 				if (!seen.has(uri)) del.run(uri);
-			}
-			this._db.exec("COMMIT");
-		} catch {
-			this._db.exec("ROLLBACK");
-		}
-	}
-
-	/** Join cached query vectors for the given query strings, in order.
-	 *  Missing/expired entries are null so callers only embed the gaps. */
-	getQueryVectors(queries: string[]): (Float32Array | null)[] {
-		const out: (Float32Array | null)[] = new Array(queries.length).fill(null);
-		if (queries.length === 0) return out;
-		try {
-			const hashes = queries.map(md5);
-			const stmt = this._db.prepare(
-				"SELECT query_hash, vector FROM query_embeddings WHERE query_hash = ? AND updated_at >= ?",
-			);
-			// Pruned once per open() (see TTL cleanup there); belt-and-suspenders
-			// freshness check keeps an aged row (opened pre-cleanup) out of use.
-			const cutoff = nowMs() - QUERY_CACHE_TTL_MS;
-			for (let i = 0; i < queries.length; i++) {
-				const row = stmt.get(hashes[i], cutoff) as
-					| { vector: string }
-					| undefined;
-				if (row) {
-					try {
-						out[i] = Float32Array.from(JSON.parse(row.vector) as number[]);
-					} catch {
-						out[i] = null;
-					}
-				}
-			}
-		} catch {
-			// cache read failure => treat as all-miss
-		}
-		return out;
-	}
-
-	/** Upsert query vectors; `vectors` parallel to `queries` (may be sparse). */
-	saveQueryVectors(queries: string[], vectors: (Float32Array | null)[]): void {
-		if (!this.db) return;
-		const stmt = this._db.prepare(
-			`INSERT INTO query_embeddings (query, query_hash, vector, updated_at)
-			 VALUES (?, ?, ?, ?)
-			 ON CONFLICT(query_hash) DO UPDATE SET
-			   query=excluded.query, vector=excluded.vector, updated_at=excluded.updated_at`,
-		);
-		const t = nowMs();
-		this._db.exec("BEGIN");
-		try {
-			for (let i = 0; i < queries.length; i++) {
-				const v = vectors[i];
-				if (!v) continue;
-				stmt.run(queries[i], md5(queries[i]), JSON.stringify([...v]), t);
 			}
 			this._db.exec("COMMIT");
 		} catch {
@@ -542,6 +519,7 @@ function cosine(a: Float32Array, b: Float32Array): number {
 async function recall(
 	queries: string[],
 	namespace: string,
+	blockedDomains: string[],
 ): Promise<{ items: RecalledItem[]; mode: "vector" | "keyword" }> {
 	// Multi-query recall: each query is scored independently and the per-doc
 	// best wins. Query[0] is the current prompt (retrieval intent); any
@@ -552,7 +530,10 @@ async function recall(
 	if (!existsSync(DB_PATH)) return { items: [], mode: "keyword" };
 	const db = new DatabaseSync(DB_PATH, { readOnly: true });
 	try {
-		const docs = loadSearchDocuments(db, namespace);
+		// Drop blocked domains (maintenance logs, raw transcripts) before
+		// anything else: they must not pollute scores, cache or TOP_K slots.
+		const blockSet = new Set(blockedDomains);
+		const docs = loadSearchDocuments(db, namespace).filter((d) => !blockSet.has(uriDomain(d.uri)));
 		if (docs.length === 0) return { items: [], mode: "keyword" };
 		const bootUris = loadBootUrisSync(db, namespace);
 		const clock = loadWorldClock();
@@ -598,26 +579,14 @@ async function recall(
 					}
 				}
 			}
-			// Query vectors: cache by the EXACT embed input (instruction-prefixed
-			// for the intent query, truncated for all). Repeated prompts (/pi,
-			// /reroll, /tree + resend) hit the cache and skip the embed API call.
-			// The doc scoring below still runs live, so semantic freshness is
-			// never traded away — only the network round-trip is saved.
+			// One embed call per query; only the intent query gets the BGE
+			// instruction. Context queries stay instruction-free (they are
+			// declarative text, closer to the passage side).
 			const embedInputs = queries.map((q, i) =>
 				i === 0 ? `${QUERY_INSTRUCTION}${q.slice(0, EMBED_INPUT_MAX - QUERY_INSTRUCTION.length)}` : q.slice(0, EMBED_INPUT_MAX),
 			);
-			const cachedQ = cache.getQueryVectors(embedInputs);
-			const missIdx: number[] = [];
-			for (let i = 0; i < cachedQ.length; i++) if (!cachedQ[i]) missIdx.push(i);
-			if (missIdx.length > 0) {
-				const missedInputs = missIdx.map((i) => embedInputs[i]);
-				const qvs = await embed(missedInputs);
-				if (qvs) {
-					cache.saveQueryVectors(missedInputs, qvs);
-					for (let j = 0; j < missIdx.length; j++) cachedQ[missIdx[j]] = qvs[j];
-				}
-			}
-			queryVecs = cachedQ.filter((v): v is Float32Array => v !== null);
+			const qvs = await embed(embedInputs);
+			queryVecs = qvs ?? [];
 			if (queryVecs.length === queries.length) {
 				mode = "vector";
 				for (const d of pool) {
@@ -758,6 +727,11 @@ export default function nocturneMemoryRecallExtension(pi: ExtensionAPI): void {
 		const prompt = event.prompt?.trim();
 		if (!prompt || prompt.startsWith("/") || prompt.startsWith("\\")) return;
 
+		// Auto-recall switch: read persisted extension setting (default ON).
+		// Off -> skip retrieval entirely; the /recall command toggles it.
+		const autoRecall = ctx.getExtensionSetting<boolean>(EXT_ID, AUTO_RECALL_KEY);
+		if (autoRecall === false) return;
+
 		const namespace = detectNamespace();
 		if (!namespace) return;
 
@@ -792,7 +766,7 @@ export default function nocturneMemoryRecallExtension(pi: ExtensionAPI): void {
 			// No usable history (fresh session / harness): prompt-only recall.
 		}
 
-		const { items, mode } = await recall(queries, namespace);
+		const { items, mode } = await recall(queries, namespace, getDomainBlocklist(ctx));
 		if (items.length === 0) return;
 
 		// Dedup against previously injected (same content version). The hash
@@ -823,13 +797,87 @@ export default function nocturneMemoryRecallExtension(pi: ExtensionAPI): void {
 	});
 
 	// Optional manual command: /memories stat
-	pi.registerCommand("memories", {
-		description: "Nocturne memory recall control (stat)",
-		handler: async (args: string) => {
-			const sub = args.trim().split(/\s+/)[0] ?? "";
-			if (sub === "stat") {
+	// Slash command to control auto-recall: /recall on | off | stat
+	// Toggles persist to Settings.extensionSettings["nocturne-recall"]["autoRecall"].
+	pi.registerCommand("recall", {
+		description:
+			"Nocturne memory auto-recall control: /recall on | off | stat | domain list|add|remove <域名> (默认 on)",
+		getArgumentCompletions: (prefix, ctx) => {
+			// Split the RAW prefix: a trailing space yields a trailing empty
+			// token, which marks "the next argument slot is empty" vs. a typed
+			// partial (e.g. "domain add " vs "domain add h"). trim() would
+			// erase that distinction.
+			const raw = prefix;
+			const parts = raw.split(/\s+/);
+			const last = parts[parts.length - 1] ?? "";
+			const cur = raw.endsWith(" ") ? "" : last;
+			const filter = (items: string[]) =>
+				items.filter((i) => i.startsWith(cur)).map((i) => ({ value: i, label: i }));
+			// Argument 1 (no subcommand typed yet): exactly one token so far.
+			if (parts.length === 1) {
+				return filter(["on", "off", "stat", "domain"]);
+			}
+			if (parts[0] === "domain") {
+				const action = parts[1] ?? "";
+				// Argument 2: domain action. Complete actions whenever the
+				// second token is NOT already a full action — whether it is
+				// empty ("domain "), a bare prefix ("domain a") or a typo
+				// ("domain addx") all complete to list/add/remove.
+				if (action !== "add" && action !== "remove" && action !== "list") {
+					return filter(["list", "add", "remove"]);
+				}
+				// Argument 3: domain name for add/remove.
+				if (action === "add") {
+					const blocked = new Set(getDomainBlocklist(ctx));
+					return filter(listDomainsFromDb().filter((d) => !blocked.has(d)));
+				}
+				if (action === "remove") {
+					return filter(getDomainBlocklist(ctx));
+				}
+				return null; // "domain list" takes no third argument
+			}
+			return null;
+		},
+		handler: async (args: string, ctx) => {
+			const parts = args.trim().split(/\s+/).filter(Boolean);
+			const sub = parts[0] ?? "";
+			const state = (): boolean =>
+				ctx.getExtensionSetting<boolean>(EXT_ID, AUTO_RECALL_KEY) !== false;
+			const blocklist = (): string[] => getDomainBlocklist(ctx);
+			if (sub === "on") {
+				ctx.setExtensionSetting(EXT_ID, AUTO_RECALL_KEY, true);
+				ctx.ui.notify("Nocturne auto-recall 已开启", "info");
+			} else if (sub === "off") {
+				ctx.setExtensionSetting(EXT_ID, AUTO_RECALL_KEY, false);
+				ctx.ui.notify("Nocturne auto-recall 已关闭", "info");
+			} else if (sub === "domain") {
+				const action = parts[1] ?? "list";
+				const domain = parts[2];
+				if (action === "add" && domain) {
+					const next = [...new Set([...blocklist(), domain])];
+					ctx.setExtensionSetting(EXT_ID, DOMAIN_BLOCKLIST_KEY, next);
+					ctx.ui.notify(`已加入域名黑名单: ${domain}（当前 ${next.join(", ") || "无"}）`, "info");
+				} else if (action === "remove" && domain) {
+					const next = blocklist().filter((d) => d !== domain);
+					ctx.setExtensionSetting(EXT_ID, DOMAIN_BLOCKLIST_KEY, next);
+					ctx.ui.notify(`已移出域名黑名单: ${domain}（当前 ${next.join(", ") || "无"}）`, "info");
+				} else if (action === "list" || !domain) {
+					ctx.ui.notify(`域名黑名单: ${blocklist().join(", ") || "无"}`, "info");
+				} else {
+					ctx.ui.notify("用法: /recall domain list | add <域名> | remove <域名>", "error");
+				}
+			} else if (sub === "stat") {
 				const ns = detectNamespace();
 				pi.appendEntry("nocturne_recall_stat", { namespace: ns, injected: [...injected.keys()] });
+				ctx.ui.notify(
+					`Nocturne auto-recall: ${state() ? "开启" : "关闭"} (namespace=${ns || "无"}, 已注入 ${injected.size} 条, 域名黑名单: ${blocklist().join(", ") || "无"})`,
+					"info",
+				);
+			} else {
+				ctx.ui.notify(
+					`用法: /recall on | off | stat | domain list|add|remove <域名> （当前 ${state() ? "开启" : "关闭"}）`,
+					"error",
+				);
 			}
 		},
 	});

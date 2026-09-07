@@ -2,10 +2,43 @@ import type { ExtensionAPI, SlotRenderContext } from "@earendil-works/pi-coding-
 
 // ── Config ──────────────────────────────────────────────────────────────────
 
-// The installation script will replace this placeholder with the actual project path.
-const MEMORY_API = process.env.NOCTURNE_MEMORY_API ?? "{{MEMORY_API}}";
+
+// Same backend the native tools extension calls, so the /set-world-time command
+// shares one code path with the set_world_time tool (isolated by namespace).
+const MEMORY_API = process.env.NOCTURNE_MEMORY_API ?? "http://127.0.0.1:8233";
 const API_TOKEN = process.env.NOCTURNE_API_TOKEN ?? "";
 
+/** Call the Nocturne memory backend like the set_world_time tool does. */
+async function setWorldTime(
+  time: string,
+  characterId?: string,
+): Promise<string> {
+  const res = await fetch(`${MEMORY_API}/api/pi-tools/invoke`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(API_TOKEN ? { Authorization: `Bearer ${API_TOKEN}` } : {}),
+    },
+    body: JSON.stringify({
+      name: "set_world_time",
+      params: {
+        time,
+        ...(characterId ? { character_id: characterId } : {}),
+      },
+      namespace: process.env.NOCTURNE_NAMESPACE?.trim() ?? "",
+      world_clock: { enabled: process.env.WORLD_CLOCK_ENABLED !== "false" },
+    }),
+  });
+  if (!res.ok) {
+    const txt = await res.text();
+    throw new Error(`Nocturne Memory API ${res.status}: ${txt}`);
+  }
+  const json = (await res.json()) as { ok: boolean; message: string };
+  if (!json.ok) {
+    throw new Error(json.message);
+  }
+  return json.message;
+}
 // ── Helper: Async memory slot query via the Nocturne Memory API ─────────────
 
 /**
@@ -41,9 +74,36 @@ async function queryMemorySlot(slotType: string, namespace: string = "default"):
   }
 }
 
+
 // ── Slot Registration ───────────────────────────────────────────────────────
 
 export default function nocturneMemoryExtension(pi: ExtensionAPI): void {
+  // ── Set world time command ────────────────────────────────────────────────
+
+  // /set-world-time <time> [character_id] — convenience wrapper over the
+  // set_world_time tool so users can advance the world clock without the agent.
+  pi.registerCommand("set-world-time", {
+    description:
+      "设置世界时间。用法: /set-world-time <日期或偏移> [角色ID] — 如 /set-world-time 2024-06-05 或 /set-world-time +1d；角色ID 留空用当前会话。",
+    handler: async (args, ctx) => {
+      const trimmed = (args ?? "").trim();
+      if (!trimmed) {
+        ctx.ui.notify(
+          "用法: /set-world-time <日期或偏移> [角色ID]，如 /set-world-time 2024-06-05 或 /set-world-time +1d",
+          "error",
+        );
+        return;
+      }
+      const [time, characterId] = trimmed.split(/\s+/);
+      try {
+        const message = await setWorldTime(time, characterId || undefined);
+        ctx.ui.notify(`[Nocturne Memory] ${message}`, "info");
+      } catch (err) {
+        ctx.ui.notify(`[Nocturne Memory] 设置世界时间失败: ${(err as Error).message}`, "error");
+      }
+    },
+  });
+
   // Register Boot Slot (async: renders via the warm memory API server)
   pi.registerSlot({
     name: "nocturne-memory-boot",
@@ -65,6 +125,7 @@ export default function nocturneMemoryExtension(pi: ExtensionAPI): void {
       return queryMemorySlot("history", ns);
     },
   });
+
 
   // Register State Slot (async: renders via the warm memory API server)
   pi.registerSlot({
@@ -94,7 +155,7 @@ export default function nocturneMemoryExtension(pi: ExtensionAPI): void {
     // FastMCP wraps the Pydantic model dump in a "result" key; native pi tools
     // (nocturne-memory-tools.ts) expose revision_id flat in details.
     const revId = structured?.result?.revision_id ?? structured?.revision_id ?? flatRevId;
-
+    
     if (revId != null) {
       pi.appendEntry("nocturne_memory_checkpoint", { revision_id: revId });
     }
@@ -106,7 +167,7 @@ export default function nocturneMemoryExtension(pi: ExtensionAPI): void {
 
     const branch = ctx.sessionManager.getBranch(newLeafId);
     let targetRevId: number | null = null;
-
+    
     for (let i = branch.length - 1; i >= 0; i--) {
       const entry = branch[i];
       if (entry.type === "custom" && entry.customType === "nocturne_memory_checkpoint") {
@@ -117,7 +178,7 @@ export default function nocturneMemoryExtension(pi: ExtensionAPI): void {
 
     if (targetRevId != null) {
       try {
-        const res = await fetch(`${MEMORY_API}/review/revisions/${targetRevId}/checkout`, {
+        const res = await fetch(`http://127.0.0.1:8233/review/revisions/${targetRevId}/checkout`, {
           method: "POST",
         });
         if (!res.ok) {
