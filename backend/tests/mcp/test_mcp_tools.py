@@ -471,3 +471,92 @@ async def test_edit_memory_append_preserves_content_verbatim(
     assert "改好" in getattr(result, "message", str(result))
     memory = await graph_service.get_memory_by_path("append_verbatim", "core")
     assert memory["content"] == "Base content\\n\\nCode: foo\\n\\nbar"
+
+
+# =============================================================================
+# edit_memory / batch_edit_memories: clearing the world time
+# =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_edit_memory_empty_time_clears_world_timestamp(mcp_module, graph_service):
+    """time="" removes the stored world time without touching content."""
+    await graph_service.create_memory(
+        parent_path="",
+        content="Temporal anchor",
+        priority=1,
+        title="time_clear_demo",
+        world_timestamp="2024-06-01",
+    )
+
+    result = await mcp_module.edit_memory(
+        "core://time_clear_demo",
+        time="",
+    )
+
+    assert "清除" in getattr(result, "message", str(result))
+    memory = await graph_service.get_memory_by_path("time_clear_demo", "core")
+    assert memory.get("world_timestamp") is None
+    assert memory["content"] == "Temporal anchor"
+
+
+@pytest.mark.asyncio
+async def test_edit_memory_time_omitted_keeps_world_timestamp(mcp_module, graph_service):
+    """Omitting time leaves the stored world time alone; time=None is not a clear."""
+    await graph_service.create_memory(
+        parent_path="",
+        content="Stable date",
+        priority=1,
+        title="time_keep_demo",
+        world_timestamp="2024-06-01",
+    )
+
+    await mcp_module.edit_memory("core://time_keep_demo", importance=2)
+
+    memory = await graph_service.get_memory_by_path("time_keep_demo", "core")
+    assert memory.get("world_timestamp") == "2024-06-01"
+
+
+@pytest.mark.asyncio
+async def test_edit_memory_clear_time_alone_is_valid_edit(mcp_module, graph_service):
+    """time="" with no other fields is its own edit mode (clears + checkpoints)."""
+    await graph_service.create_memory(
+        parent_path="",
+        content="Dated note",
+        priority=1,
+        title="time_only_clear",
+        world_timestamp="2023-11-11",
+    )
+
+    result = await mcp_module.edit_memory("core://time_only_clear", time="")
+
+    assert "清除" in getattr(result, "message", str(result))
+    memory = await graph_service.get_memory_by_path("time_only_clear", "core")
+    assert memory.get("world_timestamp") is None
+
+
+@pytest.mark.asyncio
+async def test_batch_edit_empty_time_clears_world_timestamp(mcp_module, graph_service):
+    """batch_edit_memories(time="") clears timestamps; dry_run previews the change."""
+    await graph_service.create_memory(
+        parent_path="",
+        content="Batch anchor",
+        priority=1,
+        title="batch_time_clear",
+        world_timestamp="2024-06-01",
+    )
+
+    preview = await mcp_module.batch_edit_memories(
+        ["core://batch_time_clear"],
+        time="",
+        dry_run=True,
+    )
+    assert "世界时间 → 清除" in getattr(preview, "message", str(preview))
+
+    result = await mcp_module.batch_edit_memories(
+        ["core://batch_time_clear"],
+        time="",
+    )
+    assert getattr(result, "message", str(result))
+    memory = await graph_service.get_memory_by_path("batch_time_clear", "core")
+    assert memory.get("world_timestamp") is None

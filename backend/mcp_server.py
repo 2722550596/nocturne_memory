@@ -1041,7 +1041,7 @@ async def edit_memory(
         line_content: [行编辑] 这一行的新内容
         importance: 可选，修改重要性
         when: 可选，修改想起条件
-        time: 可选，修改该记忆发生的世界时间（如 "2024-06-01" 或 "-1d"）
+        time: 可选，修改该记忆发生的世界时间（如 "2024-06-01" 或 "-1d"）；传 "" 清除时间
     Examples:
         edit_memory("core://identity/habits", old_text="每天喝咖啡", new_text="每天喝茶")
         edit_memory("core://events/encounter_0302", append="\\n今天（3月3日）又遇到了他……")
@@ -1050,15 +1050,18 @@ async def edit_memory(
     """
     graph = get_graph_service()
 
-    # Handle world time parsing
+    # Handle world time parsing: time="" clears the stored world time
+    # (matching the new_text="" delete-text convention).
     final_world_time = None
-    if time:
-        config = get_config()
-        clock = config.get("world_clock", {})
-        _, current_world_time = _cfg.get_clock_state()
-        from system_views import parse_relative_offset
-        offset_date = parse_relative_offset(time, current_world_time)
-        final_world_time = offset_date or time
+    clear_time = False
+    if time is not None:
+        if time == "":
+            clear_time = True
+        else:
+            _, current_world_time = _cfg.get_clock_state()
+            from system_views import parse_relative_offset
+            offset_date = parse_relative_offset(time, current_world_time)
+            final_world_time = offset_date or time
 
 
     try:
@@ -1143,6 +1146,7 @@ async def edit_memory(
                 domain=domain,
                 namespace=get_namespace(),
                 world_timestamp=final_world_time,
+                clear_world_timestamp=clear_time,
             )
 
             _record_rows(
@@ -1155,7 +1159,9 @@ async def edit_memory(
                 rev_id = await commit_checkpoint(session)
 
             msg = f"已经改好了：「{full_uri}」"
-            if final_world_time:
+            if clear_time:
+                msg += " (时间已清除)"
+            elif final_world_time:
                 msg += f" (时间更新为: {final_world_time})"
             return UpdateResult(
                 message=msg,
@@ -2099,7 +2105,7 @@ async def batch_edit_memories(
         importance: 新的重要性（0=最重要，数字越大越次要）。
         when: 新的想起条件（什么时候该想起这条）。
         append: 追加到每条内容末尾的文字。
-        time: 新的世界时间（YYYY-MM-DD 或相对位移如 "-1d"）。
+        time: 新的世界时间（YYYY-MM-DD 或相对位移如 "-1d"）；传 "" 清除。
         dry_run: True 时只预览每条当前值 → 将改为什么，不真正执行。
         character_id: 你的角色 ID（用于记忆隔离）。留空用默认 namespace。
 
@@ -2118,14 +2124,17 @@ async def batch_edit_memories(
         async def _do():
             namespace = get_namespace()
 
-            # 时间解析（与 edit_memory 一致）
+            # 时间解析（与 edit_memory 一致）：time="" 清除世界时间
             final_world_time = None
-            if time:
-                config = get_config()
-                _, current_world_time = _cfg.get_clock_state()
-                from system_views import parse_relative_offset
-                offset_date = parse_relative_offset(time, current_world_time)
-                final_world_time = offset_date or time
+            clear_time = False
+            if time is not None:
+                if time == "":
+                    clear_time = True
+                else:
+                    _, current_world_time = _cfg.get_clock_state()
+                    from system_views import parse_relative_offset
+                    offset_date = parse_relative_offset(time, current_world_time)
+                    final_world_time = offset_date or time
 
             results: List[Tuple[str, str, str]] = []
             for uri in uris:
@@ -2148,6 +2157,8 @@ async def batch_edit_memories(
                             changes.append(f"重要性 {mem.get('priority')} → {importance}")
                         if when is not None:
                             changes.append(f"想起条件 → {when}")
+                        if clear_time:
+                            changes.append("世界时间 → 清除")
                         if final_world_time is not None:
                             changes.append(f"世界时间 → {final_world_time}")
                         if append is not None:
@@ -2163,6 +2174,7 @@ async def batch_edit_memories(
                         domain=domain,
                         namespace=namespace,
                         world_timestamp=final_world_time,
+                        clear_world_timestamp=clear_time,
                     )
                     _record_rows(
                         before_state=result.get("rows_before", {}),

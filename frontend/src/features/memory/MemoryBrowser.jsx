@@ -536,7 +536,7 @@ export default function MemoryBrowser() {
                     
                     {node && (
                         <div className="space-y-4">
-                            <div className="flex items-start justify-between gap-4">
+                            <div className="flex flex-col md:flex-row md:items-start justify-between gap-4">
                                 <div className="space-y-3 min-w-0 flex-1">
                                     <div className="flex items-center gap-3 flex-wrap">
                                         {editing ? (
@@ -591,7 +591,7 @@ export default function MemoryBrowser() {
                                     )}
                                 </div>
                                 
-                                <div className="flex gap-2 flex-shrink-0">
+                                <div className="flex flex-wrap gap-2 flex-shrink-0 w-full md:w-auto md:justify-end">
                                     {!editing && (
                                         <button
                                             onClick={() => handleBootToggle(currentUri)}

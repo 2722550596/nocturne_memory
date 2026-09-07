@@ -1482,17 +1482,20 @@ class GraphService:
         domain: str = "core",
         namespace: str = "",
         world_timestamp: Optional[str] = None,
+        clear_world_timestamp: bool = False,
     ) -> Dict[str, Any]:
         """
         Update a memory.
 
         Content change -> new Memory row with the same node_uuid.
         Metadata change -> update the Edge directly.
+        world_timestamp=None means "leave the stored time as-is";
+        clear_world_timestamp=True explicitly sets it to NULL.
         """
-        if content is None and priority is None and disclosure is None and world_timestamp is None:
+        if content is None and priority is None and disclosure is None and world_timestamp is None and not clear_world_timestamp:
             raise ValueError(
                 f"No update fields provided for '{domain}://{path}'. "
-                "At least one of content, priority, or disclosure must be set."
+                "At least one of content, priority, disclosure, or world_timestamp must be set."
             )
 
         async with self.session() as session:
@@ -1546,7 +1549,11 @@ class GraphService:
                 rows_before["memories"] = [serialize_memory_ref(old_memory)]
 
                 # If content changed, use provided timestamp or carry over existing one
-                target_timestamp = world_timestamp if world_timestamp is not None else old_memory.world_timestamp
+                target_timestamp = (
+                    None
+                    if clear_world_timestamp
+                    else (world_timestamp if world_timestamp is not None else old_memory.world_timestamp)
+                )
 
                 new_memory = await self._insert_memory(
                     session, node_uuid, content, 
@@ -1576,8 +1583,8 @@ class GraphService:
                 ]
             else:
                 # content didn't change. We might update world_timestamp in-place.
-                if world_timestamp is not None:
-                    old_memory.world_timestamp = world_timestamp
+                if world_timestamp is not None or clear_world_timestamp:
+                    old_memory.world_timestamp = None if clear_world_timestamp else world_timestamp
                     session.add(old_memory)
                     rows_after["memories"] = [serialize_memory_ref(old_memory)]
                 
