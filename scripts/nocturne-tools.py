@@ -386,9 +386,7 @@ def cmd_search(args):
             print(f"\n共 {total} 条结果")
     else:
         result = api_get(f"/api/browse/search?q={urllib.parse.quote(query)}&namespace={urllib.parse.quote(ns)}")
-    results = result if isinstance(result, list) else result.get("results", [])
-    if domain_filter:
-        results = [r for r in results if r.get("uri", "").startswith(f"{domain_filter}://")]
+        results = result if isinstance(result, list) else result.get("results", [])
         if not results:
             print("未找到相关记忆。")
             return
