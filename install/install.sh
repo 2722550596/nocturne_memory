@@ -20,7 +20,7 @@ echo "==> Installing Extensions..."
 # Extensions with {{MEMORY_DIR}}/{{MEMORY_API}}/{{PI_AGENT_DIR}} placeholders get
 # them substituted with the real project / API base URL / agent dir paths.
 MEMORY_API="${NOCTURNE_MEMORY_API:-http://127.0.0.1:8233}"
-for ext in nocturne-memory.ts nocturne-memory-recall.ts; do
+for ext in nocturne-memory.ts nocturne-memory-recall.ts nocturne-memory-tools.ts; do
     TMP_EXT=$(mktemp)
     sed -e "s|{{MEMORY_DIR}}|${PROJECT_DIR}|g" -e "s|{{MEMORY_API}}|${MEMORY_API}|g" -e "s|{{PI_AGENT_DIR}}|${PI_AGENT}|g" \
         "${INSTALL_DIR}/extensions/${ext}" > "$TMP_EXT"
