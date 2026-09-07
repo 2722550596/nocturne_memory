@@ -4,6 +4,8 @@
   "name": "Elias Chat 预填充",
   "tools": {
     "allow": [
+      "read",
+      "bash",
       "intercom",
       "*_memory",
       "*_memories"

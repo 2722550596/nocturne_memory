@@ -4,6 +4,8 @@
   "name": "Elias Chat",
   "tools": {
     "allow": [
+      "read",
+      "bash",
       "intercom",
       "*_memory",
       "*_memories"
