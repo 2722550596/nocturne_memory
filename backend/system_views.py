@@ -339,7 +339,9 @@ async def generate_memory_index_view(domain_filter: Optional[str] = None) -> str
                     uri = primary.get("uri", make_uri(domain_name, primary["path"]))
                     priority = primary.get("priority", 0)
                     imp_str = f" [\u2605{priority}]"
-                    lines.append(f"- {uri}{imp_str}")
+                    ts = primary.get("world_timestamp")
+                    ts_str = f" ({ts})" if ts else ""
+                    lines.append(f"- {uri}{imp_str}{ts_str}")
                 lines.append("")
 
         return "\n".join(lines)
